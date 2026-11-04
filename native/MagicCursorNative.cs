@@ -548,10 +548,61 @@ namespace MagicCursorNative
             catch { }
         }
 
+        static string RecognizeTextFromBitmapSync(Bitmap bmp)
+        {
+            try
+            {
+                OcrEngine engine = OcrEngine.TryCreateFromUserProfileLanguages();
+                if (engine == null) return "";
+
+                byte[] pngBytes;
+                using (MemoryStream ms = new MemoryStream())
+                {
+                    bmp.Save(ms, ImageFormat.Png);
+                    pngBytes = ms.ToArray();
+                }
+
+                using (InMemoryRandomAccessStream stream = new InMemoryRandomAccessStream())
+                {
+                    using (DataWriter writer = new DataWriter(stream.GetOutputStreamAt(0)))
+                    {
+                        writer.WriteBytes(pngBytes);
+                        WaitWinRt(writer.StoreAsync());
+                        writer.DetachStream();
+                    }
+                    stream.Seek(0);
+                    BitmapDecoder decoder = WaitWinRt(BitmapDecoder.CreateAsync(stream));
+                    if (decoder == null) return "";
+                    SoftwareBitmap softBmp = WaitWinRt(decoder.GetSoftwareBitmapAsync());
+                    if (softBmp == null) return "";
+                    using (softBmp)
+                    {
+                        OcrResult res = WaitWinRt(engine.RecognizeAsync(softBmp));
+                        if (res == null || res.Lines == null) return "";
+                        StringBuilder sb = new StringBuilder();
+                        foreach (OcrLine line in res.Lines)
+                        {
+                            if (line != null && !string.IsNullOrWhiteSpace(line.Text))
+                            {
+                                if (sb.Length > 0) sb.Append(" ");
+                                sb.Append(line.Text.Trim());
+                            }
+                        }
+                        return sb.ToString();
+                    }
+                }
+            }
+            catch
+            {
+                return "";
+            }
+        }
+
         static void CropFromMemoryOrScreen(string reqId, int x, int y, int w, int h, string outPath)
         {
             try
             {
+                string cropOcrText = "";
                 lock (BitmapLock)
                 {
                     if (CachedDesktopBitmap != null)
@@ -564,16 +615,26 @@ namespace MagicCursorNative
                         using (Bitmap crop = CachedDesktopBitmap.Clone(rect, CachedDesktopBitmap.PixelFormat))
                         {
                             crop.Save(outPath, ImageFormat.Png);
+                            cropOcrText = RecognizeTextFromBitmapSync(crop);
                         }
-                        Console.WriteLine(string.Format("{{\"type\":\"cropped\",\"id\":\"{0}\",\"ok\":true}}", reqId));
+                        Console.WriteLine(string.Format("{{\"type\":\"cropped\",\"id\":\"{0}\",\"ok\":true,\"ocrText\":\"{1}\"}}", reqId, EscapeJson(cropOcrText)));
                         Console.Out.Flush();
                         return;
                     }
                 }
 
                 // Fallback to direct screen capture
-                CaptureScreenToFile(new Rectangle(x, y, Math.Max(4, w), Math.Max(4, h)), outPath);
-                Console.WriteLine(string.Format("{{\"type\":\"cropped\",\"id\":\"{0}\",\"ok\":true}}", reqId));
+                Rectangle fallbackRect = new Rectangle(x, y, Math.Max(4, w), Math.Max(4, h));
+                using (Bitmap bmp = new Bitmap(fallbackRect.Width, fallbackRect.Height, PixelFormat.Format32bppArgb))
+                {
+                    using (Graphics g = Graphics.FromImage(bmp))
+                    {
+                        g.CopyFromScreen(fallbackRect.Left, fallbackRect.Top, 0, 0, fallbackRect.Size, CopyPixelOperation.SourceCopy);
+                    }
+                    bmp.Save(outPath, ImageFormat.Png);
+                    cropOcrText = RecognizeTextFromBitmapSync(bmp);
+                }
+                Console.WriteLine(string.Format("{{\"type\":\"cropped\",\"id\":\"{0}\",\"ok\":true,\"ocrText\":\"{1}\"}}", reqId, EscapeJson(cropOcrText)));
                 Console.Out.Flush();
             }
             catch

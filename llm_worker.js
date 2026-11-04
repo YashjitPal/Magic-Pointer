@@ -70,26 +70,36 @@ function cleanVisualLabel(rawLabel) {
 }
 
 // Build 3 diverse, specific, <45-char suggestion chips following Google's exact rules in `action_suggestions_prompt` (strings.xml:33)
-function buildSmartSuggestions({ ocrText, visualLabels, aoiCount, hasFiles, llmSuggestion }) {
+function buildSmartSuggestions({ ocrText, visualLabels, aoiCount, hasFiles, llmSuggestions }) {
   const ocr = (ocrText || '').trim();
   const ocrLower = ocr.toLowerCase();
   const topVisual = cleanVisualLabel(visualLabels && visualLabels[0]);
-  const topVisualLower = topVisual.toLowerCase();
   const allVisualText = (visualLabels || []).map(cleanVisualLabel).join(' ').toLowerCase();
 
   const pool = [];
   const pushChip = (s) => {
     if (!s) return;
-    const clean = String(s)
+    let clean = String(s)
       .replace(/^[\s\-*•\d.)"']+/, '')
       .replace(/["'`]+$/g, '')
+      .replace(/\s+/g, ' ')
       .trim();
-    if (clean.length < 6 || clean.length > 45) return;
-    if (/^(tell me more|open in |rename |delete |move to )/i.test(clean)) return;
+    if (clean.length > 0) {
+      clean = clean.charAt(0).toUpperCase() + clean.slice(1);
+    }
+    if (clean.length < 8 || clean.length > 45) return;
+    if (/^(tell me more|open in |rename |delete |move to |question:|action:|prompt:|answer:)/i.test(clean)) return;
     if (!pool.some((x) => x.toLowerCase() === clean.toLowerCase())) {
       pool.push(clean);
     }
   };
+
+  // Prioritize the 3 LLM-generated suggestions (Analyze / Transform / Ideate) first!
+  if (Array.isArray(llmSuggestions)) {
+    for (const s of llmSuggestions) {
+      pushChip(s);
+    }
+  }
 
   // Multi-selection synthesis (Examples 12, 15, 16, 17, 19, 20 in strings.xml:33)
   if (aoiCount > 1) {
@@ -293,11 +303,11 @@ self.onmessage = async (e) => {
     return;
   }
 
-  if (msg.type === 'generate_suggestions') {
+  if ( msg.type === 'generate_suggestions') {
     const { reqId, ocrText, imageDataUrl, aoiCount, hasFiles, modelDirUrl: dirUrl } = msg;
     const baseDir = dirUrl || modelDirUrl;
     let visualLabels = [];
-    let llmSuggestion = '';
+    const llmSuggestions = [];
 
     try {
       // Step 1: If an image dataUrl is present, run the on-device ResNet-50 vision model to see what object/scene is in the image!
@@ -307,33 +317,38 @@ self.onmessage = async (e) => {
           const preds = await clf(imageDataUrl, { topk: 3 });
           if (Array.isArray(preds)) {
             visualLabels = preds
-              .filter((p) => p && p.score >= 0.08 && p.label)
+              .filter((p) => p && p.score >= 0.15 && p.label)
               .map((p) => p.label);
           }
         }
       }
 
-      // Step 2: Run LaMini-Flan-T5-77M on the combined visual + OCR context to synthesize a custom action prompt
+      // Step 2: Run LaMini-Flan-T5-77M across all 3 Googlebook intent categories (Analyze, Transform, Ideate)
       const gen = await getTextGenerator(baseDir);
       const topVis = cleanVisualLabel(visualLabels[0]);
-      const combinedContext = [
-        topVis ? `Image of ${topVis}` : '',
-        ocrText ? `Text: "${ocrText.slice(0, 180)}"` : ''
-      ]
-        .filter(Boolean)
-        .join('. ');
+      const subjectDesc = ocrText
+        ? `"${ocrText.replace(/\s+/g, ' ').trim().slice(0, 140)}"`
+        : topVis
+          ? `a photo of a ${topVis}`
+          : '';
 
-      if (gen && combinedContext) {
-        const prompt = `Write a short 4-word question or action a user can ask an AI assistant about: ${combinedContext}. Question:`;
-        const out = await gen(prompt, {
-          max_new_tokens: 12,
-          temperature: 0.2,
-          do_sample: false
-        });
-        if (Array.isArray(out) && out[0] && out[0].generated_text) {
-          const candidate = out[0].generated_text.split(/[\n\t.?!]/)[0].trim();
-          if (candidate.length >= 8 && candidate.length <= 45) {
-            llmSuggestion = candidate;
+      if (gen && subjectDesc) {
+        const prompts = [
+          `Write a short 5-word question to understand or explain ${subjectDesc}:`,
+          `Write a short 5-word command to summarize or rewrite ${subjectDesc}:`,
+          `Write a short 5-word question to brainstorm ideas or next steps for ${subjectDesc}:`
+        ];
+        for (const p of prompts) {
+          const out = await gen(p, {
+            max_new_tokens: 12,
+            temperature: 0.2,
+            do_sample: false
+          });
+          if (Array.isArray(out) && out[0] && out[0].generated_text) {
+            const candidate = out[0].generated_text.split(/[\n\t.?!]/)[0].trim();
+            if (candidate.length >= 8 && candidate.length <= 45) {
+              llmSuggestions.push(candidate);
+            }
           }
         }
       }
@@ -346,7 +361,7 @@ self.onmessage = async (e) => {
       visualLabels,
       aoiCount: aoiCount || 1,
       hasFiles: !!hasFiles,
-      llmSuggestion
+      llmSuggestions
     });
 
     self.postMessage({

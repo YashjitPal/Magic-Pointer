@@ -2765,6 +2765,13 @@ function getMagicCueSuggestionsForOcrText(rawText) {
   const text = (rawText || '').trim();
   if (!text) return [];
 
+  // Normalize common OCR spacing artifacts around slashes and dots in URLs/emails
+  const normalizedUrlText = text
+    .replace(/(https?)\s*:\s*\/\s*\/\s*/gi, '$1://')
+    .replace(/\b(www)\s*\.\s*/gi, 'www.')
+    .replace(/([a-z0-9-]+)\s*\.\s*(com|org|net|edu|gov|io|dev|ai|co|app|me|gg|tv|xyz|info|uk|in|ca|de|fr|jp)\b/gi, '$1.$2')
+    .replace(/(\.(?:com|org|net|edu|gov|io|dev|ai|co|app|me|gg|tv|xyz))\s*\/\s*([a-z0-9_-]+)/gi, '$1/$2');
+
   const cues = [];
   const seenPrompts = new Set();
   const addCue = (prompt, iconType, url) => {
@@ -2779,46 +2786,56 @@ function getMagicCueSuggestionsForOcrText(rawText) {
   };
 
   // 1. Email detection (strings.xml:33: "Open <Email>")
-  const emailMatch = text.match(/\b([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\b/);
+  const emailMatch = normalizedUrlText.match(/\b([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\b/);
   if (emailMatch) {
     const email = emailMatch[1];
     const shortEmail = email.length > 26 ? email.slice(0, 24) + '…' : email;
     addCue(`Open ${shortEmail}`, 'email', `mailto:${email}`);
   }
 
-  // 2. URL / Website detection
-  const urlMatch = text.match(/\b((?:https?:\/\/|www\.)[^\s<>()"']+|(?:[a-z0-9-]+\.)+(?:com|org|net|edu|gov|io|dev|ai|co|app)(?:\/[^\s<>()"']*)?)\b/i);
-  if (urlMatch && (!emailMatch || !urlMatch[1].includes('@'))) {
-    let rawUrl = urlMatch[1].replace(/[.,;:!?)]+$/, '');
-    const fullUrl = /^https?:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
-    let host = rawUrl.replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0];
-    if (host.length > 22) host = host.slice(0, 20) + '…';
+  // 2. URL / Website detection (supports https://, www., and bare domains/paths like github.com/user/repo or youtube.com)
+  const urlRegex = /\b((?:https?:\/\/|www\.)[^\s<>()"']+|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|org|net|edu|gov|io|dev|ai|co|app|me|gg|tv|xyz|info|uk|in|ca|de|fr|jp)(?:\/[^\s<>()"']*)?)\b/gi;
+  let urlMatch;
+  while ((urlMatch = urlRegex.exec(normalizedUrlText)) !== null) {
+    const candidate = urlMatch[1].replace(/[.,;:!?)'"\]]+$/, '');
+    const beforeChar = urlMatch.index > 0 ? normalizedUrlText[urlMatch.index - 1] : '';
+    if (beforeChar === '@' || candidate.includes('@')) continue;
+    if (/^(console|window|document|math|object|array|string|number|json|system|process)\./i.test(candidate)) continue;
+    const fullUrl = /^https?:\/\//i.test(candidate) ? candidate : `https://${candidate}`;
+    let host = candidate.replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0];
+    if (host.length > 24) host = host.slice(0, 22) + '…';
     addCue(`Open ${host}`, 'link', fullUrl);
+    break;
   }
 
   // 3. Street Address / Location detection (strings.xml:33: "Open in Maps")
-  const addressMatch = text.match(/\b(\d{1,5}\s+[A-Z][A-Za-z0-9.\s]{2,30}\s+(?:St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|Lane|Way|Ct|Court|Pl|Place|Pkwy|Parkway|Square|Sq)\b(?:,?\s*[A-Za-z\s]{2,20})?)/i);
+  const addressMatch = text.match(/\b(\d{1,5}\s+[A-Z][A-Za-z0-9.]{1,20}(?:\s+[A-Z][A-Za-z0-9.]{1,20}){0,3}\s+(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln|Court|Ct|Parkway|Pkwy|Plaza|Square)\b(?:,\s*[A-Z][A-Za-z\s]{2,20})?)/);
   if (addressMatch) {
     const addr = addressMatch[1].trim();
     addCue('Open in Maps', 'maps', `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}`);
   }
 
-  // 4. Date / Time / Event detection (strings.xml:33: "Add to Calendar")
-  const dateMatch = text.match(/\b((?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?|\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Tomorrow)\b(?:\s+at\s+\d{1,2}(?::\d{2})?\s*(?:AM|PM|am|pm)?)?|\b\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)\b)/i);
-  if (dateMatch) {
+  // 4. Date / Time / Calendar Event detection (strings.xml:33: "Add to Calendar")
+  // STRICT: Never match lowercase "may" or standalone clock times or git/log timestamps!
+  const hasExplicitMonthDay = /\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?|(?:May))\s+\d{1,2}(?:st|nd|rd|th)?(?:,\s*\d{4}|\s+at\s+\d{1,2}(?::\d{2})?\s*(?:AM|PM|am|pm))\b/.test(text);
+  const hasDayWithTime = /\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Tomorrow)\s+(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:AM|PM|am|pm)\b/i.test(text);
+  const hasEventKeywordWithTime = /\b(?:meeting|appointment|call|webinar|conference|dinner|lunch|party|flight|event|session|interview|deadline|reminder)\b[^.!?\n]{0,40}\b(?:\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)|\d{1,2}\s*(?:AM|PM|am|pm)|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2})\b/i.test(text);
+  const isLogOrCodeTimestamp = /\b\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}|\b(?:commit|author:|date:|pid:|exit_code|elapsed_ms)\b/i.test(text);
+
+  if ((hasExplicitMonthDay || hasDayWithTime || hasEventKeywordWithTime) && !isLogOrCodeTimestamp) {
     const eventTitle = text.split(/\r?\n/)[0].slice(0, 60).trim();
     addCue('Add to Calendar', 'calendar', `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(eventTitle)}`);
   }
 
   // 5. Flight Number detection (strings.xml:33 Example 5: "UA 456")
-  const flightMatch = text.match(/\b([A-Z]{2}|[A-Z]\d|\d[A-Z])\s?(\d{2,4})\b/);
-  if (flightMatch && /\b(flight|airline|airport|terminal|gate|depart|arriv|UA|AA|DL|BA|LH|AF|EK|QF|SQ|WN|AS|B6)\b/i.test(text)) {
+  const flightMatch = text.match(/\b(UA|AA|DL|BA|LH|AF|EK|QF|SQ|WN|AS|B6|AC|NH|JL|CX|TK|QR)\s?(\d{2,4})\b/);
+  if (flightMatch && /\b(flight|airline|airport|terminal|gate|depart|arriv|boarding)\b/i.test(text)) {
     const flightCode = `${flightMatch[1]} ${flightMatch[2]}`;
     addCue(`Check flight ${flightCode}`, 'flight', `https://www.google.com/search?q=${encodeURIComponent(flightCode + ' flight status')}`);
   }
 
-  // 6. Phone Number detection
-  const phoneMatch = text.match(/(?:\+?\d{1,3}[\s.-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b/);
+  // 6. Phone Number detection (strictly formatted phone numbers)
+  const phoneMatch = text.match(/(?:\+\d{1,3}[\s.-])?\(\d{3}\)[\s.-]?\d{3}[\s.-]\d{4}\b|(?:\+\d{1,3}[\s.-])?\b\d{3}-\d{3}-\d{4}\b/);
   if (phoneMatch) {
     const phone = phoneMatch[0].trim();
     addCue(`Call ${phone}`, 'phone', `tel:${phone.replace(/[^\d+]/g, '')}`);
@@ -3396,7 +3413,7 @@ window.addEventListener('mouseup', async (e) => {
     if (state.selectedAOIs.length < 10) {
       const crop = await api.cropAOI(rect);
       if (crop) {
-        const containedText = fetchContainedOcrTextForRect(rect);
+        const containedText = (crop.ocrText && crop.ocrText.trim()) || fetchContainedOcrTextForRect(rect);
         state.selectedAOIs.push({
           id: `aoi_${Date.now()}_${Math.random()}`,
           type: 'screen',
@@ -3439,7 +3456,7 @@ window.addEventListener('mouseup', async (e) => {
           const hRect = state.hoveredAoi.rect;
           const crop = await api.cropAOI(hRect);
           if (crop) {
-            const containedText = fetchContainedOcrTextForRect(hRect);
+            const containedText = (crop.ocrText && crop.ocrText.trim()) || fetchContainedOcrTextForRect(hRect);
             state.selectedAOIs.push({
               id: `aoi_${Date.now()}_${Math.random()}`,
               type: 'screen',

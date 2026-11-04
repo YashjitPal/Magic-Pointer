@@ -162,7 +162,7 @@ function cropDesktopRegionAsync(rect) {
       resolve(null);
     }, 1800);
 
-    pendingCropCallbacks.set(reqId, (ok) => {
+    pendingCropCallbacks.set(reqId, (ok, ocrText) => {
       clearTimeout(timer);
       if (ok && fs.existsSync(outPath)) {
         try {
@@ -170,6 +170,7 @@ function cropDesktopRegionAsync(rect) {
           resolve({
             filePath: outPath,
             dataUrl: `data:image/png;base64,${data.toString('base64')}`,
+            ocrText: ocrText || '',
             width: rect.width,
             height: rect.height
           });
@@ -279,6 +280,8 @@ function deactivateMagicPointer() {
 }
 
 function getNativeWatcherExePath() {
+  const v4Path = path.join(__dirname, 'native', 'MagicCursorNative_v4.exe');
+  if (fs.existsSync(v4Path)) return v4Path;
   const v3Path = path.join(__dirname, 'native', 'MagicCursorNative_v3.exe');
   if (fs.existsSync(v3Path)) return v3Path;
   const v2Path = path.join(__dirname, 'native', 'MagicCursorNative_v2.exe');
@@ -340,7 +343,7 @@ function startNativeWatcher() {
           const cb = pendingCropCallbacks.get(msg.id);
           if (cb) {
             pendingCropCallbacks.delete(msg.id);
-            cb(!!msg.ok);
+            cb(!!msg.ok, msg.ocrText || '');
           }
         } else if (msg.type === 'windows') {
           const scaleFactor = screen.getPrimaryDisplay().scaleFactor || 1;
