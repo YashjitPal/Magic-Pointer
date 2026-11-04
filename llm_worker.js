@@ -20,6 +20,7 @@ async function ensureTransformersLoaded() {
     const baseUrl = new URL('./extracted_assets/transformers/dist/', self.location.href).href;
     envObj.backends.onnx.wasm.wasmPaths = baseUrl;
     envObj.backends.onnx.wasm.numThreads = 1;
+    envObj.useBrowserCache = false;
     envObj.allowRemoteModels = false;
     envObj.allowLocalModels = true;
     return true;
