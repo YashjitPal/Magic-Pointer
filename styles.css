@@ -1591,6 +1591,121 @@ body.theme-light .suggestion-chip-icon {
 }
 
 /* ============================================================================
+   11b. Optional Magic Cue Smart Actions Settings Card & Download Progress
+   ============================================================================ */
+.magic-cue-settings-card {
+  width: 100%;
+  border-radius: 16px;
+  border: 1px solid var(--outline-variant);
+  background: var(--surface-container-low, rgba(255, 255, 255, 0.04));
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.magic-cue-settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.magic-cue-settings-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.magic-cue-settings-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.magic-cue-settings-title {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--on-surface);
+}
+
+.magic-cue-badge {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--secondary-container);
+  color: var(--on-secondary-container, var(--on-surface));
+}
+
+.magic-cue-badge.installed {
+  background: rgba(129, 201, 149, 0.18);
+  color: #81c995;
+}
+
+body.theme-light .magic-cue-badge.installed {
+  background: rgba(19, 115, 51, 0.14);
+  color: #137333;
+}
+
+.magic-cue-settings-desc {
+  margin: 0;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--on-surface-variant);
+}
+
+.magic-cue-action-btn {
+  height: 34px;
+  padding: 0 14px;
+  font-size: 12.5px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.magic-cue-action-btn.active {
+  background: var(--primary);
+  color: var(--on-primary);
+  border-color: var(--primary);
+}
+
+.magic-cue-progress-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.magic-cue-progress-bar {
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--outline-variant);
+  overflow: hidden;
+}
+
+.magic-cue-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--primary);
+  transition: width 180ms ease;
+}
+
+.magic-cue-progress-text {
+  font-size: 11.5px;
+  color: var(--on-surface-variant);
+}
+
+.suggestion-chip-magic-cue-icon {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  color: var(--primary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ============================================================================
    12. Custom Floating Magic Pointer Cursor (24x24px matching Windows cursor size)
    ============================================================================ */
 .custom-cursor {

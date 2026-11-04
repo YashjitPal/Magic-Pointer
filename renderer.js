@@ -118,7 +118,12 @@ const state = {
   lastShakeInterventionShownMs: 0,
   fteStep: 'wiggle-adjust',
   lottieInstance: null,
-  lottiePaused: false
+  lottiePaused: false,
+  // Optional Magic Cue Smart Actions (MagicCueImpl.java & PromptBoxStateFragmentPeer.java:96-97):
+  // MAX_MAGIC_CUE_SUGGESTIONS = 2, MAX_TOTAL_SUGGESTIONS = 3
+  magicCueEnabled: false,
+  magicCuePackDownloaded: false,
+  magicCueDownloading: false
 };
 
 // DOM Elements
@@ -2689,51 +2694,171 @@ function renderSelectedAOIsAndChips(opts = {}) {
   requestAnimationFrame(refreshCachedLayoutMetrics);
 }
 
+// ============================================================================
+// 5d. MagicCueImpl Entity Classifier & PromptBoxStateFragmentPeer.syncSuggestions
+//     Exact port of MagicCueImpl.java, MagicCueImpl$getSuggestion$2$1.java,
+//     Suggestion.java (Suggestion.MagicCue vs Suggestion.Gemini), and
+//     PromptBoxStateFragmentPeer.java (lines 96-97, 519-537, 590-641):
+//     - MAX_MAGIC_CUE_SUGGESTIONS = 2
+//     - MAX_TOTAL_SUGGESTIONS = 3
+//     - Optional feature: only runs when `state.magicCueEnabled && state.magicCuePackDownloaded`!
+// ============================================================================
+const MAGIC_CUE_ICONS = {
+  email: `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>`,
+  link: `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>`,
+  maps: `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/></svg>`,
+  calendar: `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 4h-1V2h-2v2H8V2H6v2H5c-1.11 0-1.99.9-1.99 2L3 20c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V10h14v10zm0-12H5V6h14v2z"/></svg>`,
+  flight: `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M21 16v-2l-8-5V3.5c0-.83-.67-1.5-1.5-1.5S10 2.67 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z"/></svg>`,
+  phone: `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></svg>`
+};
+
+function getMagicCueSuggestionsForOcrText(rawText) {
+  // PromptBoxStateFragmentPeer.java:830: if (!this.$magicCueEnabled) return emptyList()
+  if (!state.magicCueEnabled || !state.magicCuePackDownloaded) return [];
+  const text = (rawText || '').trim();
+  if (!text) return [];
+
+  const cues = [];
+  const seenPrompts = new Set();
+  const addCue = (prompt, iconType, url) => {
+    if (cues.length >= 2 || seenPrompts.has(prompt)) return; // MAX_MAGIC_CUE_SUGGESTIONS = 2
+    seenPrompts.add(prompt);
+    cues.push({
+      kind: 'magic-cue',
+      prompt,
+      iconSvg: MAGIC_CUE_ICONS[iconType] || MAGIC_CUE_ICONS.link,
+      url
+    });
+  };
+
+  // 1. Email detection (strings.xml:33: "Open <Email>")
+  const emailMatch = text.match(/\b([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\b/);
+  if (emailMatch) {
+    const email = emailMatch[1];
+    const shortEmail = email.length > 26 ? email.slice(0, 24) + '…' : email;
+    addCue(`Open ${shortEmail}`, 'email', `mailto:${email}`);
+  }
+
+  // 2. URL / Website detection
+  const urlMatch = text.match(/\b((?:https?:\/\/|www\.)[^\s<>()"']+|(?:[a-z0-9-]+\.)+(?:com|org|net|edu|gov|io|dev|ai|co|app)(?:\/[^\s<>()"']*)?)\b/i);
+  if (urlMatch && (!emailMatch || !urlMatch[1].includes('@'))) {
+    let rawUrl = urlMatch[1].replace(/[.,;:!?)]+$/, '');
+    const fullUrl = /^https?:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
+    let host = rawUrl.replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0];
+    if (host.length > 22) host = host.slice(0, 20) + '…';
+    addCue(`Open ${host}`, 'link', fullUrl);
+  }
+
+  // 3. Street Address / Location detection (strings.xml:33: "Open in Maps")
+  const addressMatch = text.match(/\b(\d{1,5}\s+[A-Z][A-Za-z0-9.\s]{2,30}\s+(?:St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|Lane|Way|Ct|Court|Pl|Place|Pkwy|Parkway|Square|Sq)\b(?:,?\s*[A-Za-z\s]{2,20})?)/i);
+  if (addressMatch) {
+    const addr = addressMatch[1].trim();
+    addCue('Open in Maps', 'maps', `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}`);
+  }
+
+  // 4. Date / Time / Event detection (strings.xml:33: "Add to Calendar")
+  const dateMatch = text.match(/\b((?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?|\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Tomorrow)\b(?:\s+at\s+\d{1,2}(?::\d{2})?\s*(?:AM|PM|am|pm)?)?|\b\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)\b)/i);
+  if (dateMatch) {
+    const eventTitle = text.split(/\r?\n/)[0].slice(0, 60).trim();
+    addCue('Add to Calendar', 'calendar', `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(eventTitle)}`);
+  }
+
+  // 5. Flight Number detection (strings.xml:33 Example 5: "UA 456")
+  const flightMatch = text.match(/\b([A-Z]{2}|[A-Z]\d|\d[A-Z])\s?(\d{2,4})\b/);
+  if (flightMatch && /\b(flight|airline|airport|terminal|gate|depart|arriv|UA|AA|DL|BA|LH|AF|EK|QF|SQ|WN|AS|B6)\b/i.test(text)) {
+    const flightCode = `${flightMatch[1]} ${flightMatch[2]}`;
+    addCue(`Check flight ${flightCode}`, 'flight', `https://www.google.com/search?q=${encodeURIComponent(flightCode + ' flight status')}`);
+  }
+
+  // 6. Phone Number detection
+  const phoneMatch = text.match(/(?:\+?\d{1,3}[\s.-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b/);
+  if (phoneMatch) {
+    const phone = phoneMatch[0].trim();
+    addCue(`Call ${phone}`, 'phone', `tel:${phone.replace(/[^\d+]/g, '')}`);
+  }
+
+  return cues.slice(0, 2); // MAX_MAGIC_CUE_SUGGESTIONS = 2
+}
+
 function getContextualSuggestions() {
   const count = state.selectedAOIs.length;
   const hasFiles = state.selectedAOIs.some((a) => a.type === 'file');
   const hasTextAoi = state.selectedAOIs.some((a) => a.type === 'text' || a.category === 'TEXT');
-  const firstOcrText = (state.selectedAOIs.find((a) => a.ocrText && a.ocrText.trim()) || {}).ocrText || '';
+  // PromptBoxStateFragmentPeer.java:835-840:
+  // Joins all non-null ocrText across selectedAOIs with " "
+  const combinedOcrText = state.selectedAOIs
+    .map((a) => (a.ocrText && a.ocrText.trim()) || '')
+    .filter(Boolean)
+    .join(' ');
 
   // PromptBoxStateFragmentPeer.java:762 & MainScreenKt$MainScreen$6$1.java:51:
   // If selectedAOIs is empty, clearSuggestions() -> 0 suggestion chips!
   if (count === 0) {
     return [];
-  } else if (count === 1) {
+  }
+
+  // 1. MagicCue Chips (up to MAX_MAGIC_CUE_SUGGESTIONS = 2)
+  const magicCueChips = getMagicCueSuggestionsForOcrText(combinedOcrText);
+
+  // 2. Gemini Chips (PromptBoxStateFragmentPeer.syncSuggestions lines 523-526):
+  //    remainingCapacity = 3 - newMagicCuePart.size()
+  let geminiPrompts = [];
+  if (count === 1) {
     if (hasFiles) {
-      return [
+      geminiPrompts = [
         'Summarize key takeaways from this file',
         'Extract action items and important details',
         'Rewrite or format this into a clean table'
       ];
-    }
-    if (hasTextAoi && firstOcrText) {
-      const words = firstOcrText.trim().split(/\s+/);
+    } else if (hasTextAoi && combinedOcrText) {
+      const words = combinedOcrText.trim().split(/\s+/);
       const preview = words.slice(0, 4).join(' ') + (words.length > 4 ? '…' : '');
-      return [
+      geminiPrompts = [
         `Explain "${preview}" in simple terms`,
         'Rewrite or polish this selected text',
         'Translate or summarize key points from this text'
       ];
-    }
-    if (firstOcrText) {
-      return [
+    } else if (combinedOcrText) {
+      geminiPrompts = [
         'Explain this selection in detail',
         'Extract text and summarize key points',
         'Answer questions or find info about this'
       ];
+    } else {
+      geminiPrompts = [
+        'Explain this selection in detail',
+        'Identify objects and key details shown here',
+        'Suggest next steps based on this'
+      ];
     }
-    return [
-      'Explain this selection in detail',
-      'Identify objects and key details shown here',
-      'Suggest next steps based on this'
-    ];
   } else {
-    return [
+    geminiPrompts = [
       `Compare and synthesize these ${count} selections`,
       'Summarize common themes across these items',
       'Create an action plan combining these'
     ];
+  }
+
+  const remainingCapacity = Math.max(0, 3 - magicCueChips.length);
+  const geminiChips = geminiPrompts.slice(0, remainingCapacity).map((prompt) => ({
+    kind: 'gemini',
+    prompt
+  }));
+
+  return [...magicCueChips, ...geminiChips];
+}
+
+function executeMagicCueSuggestion(suggestion) {
+  // Exact port of PromptBoxStateFragmentPeer.onSuggestionClicked (PromptBoxStateFragmentPeer.java:606-612 & 633-641):
+  // Executes the MagicCue action intent and calls clearSelectionAndFinish(false)!
+  state.selectedAOIs = [];
+  state.promptText = '';
+  state.draftSavedAtMs = 0;
+  promptInput.value = '';
+  promptInput.style.height = 'auto';
+  renderScreenAOICards();
+  if (api.executeMagicCue) {
+    api.executeMagicCue({ prompt: suggestion.prompt, url: suggestion.url });
   }
 }
 
@@ -2753,9 +2878,11 @@ function renderSuggestionChips() {
   suggestionChipsContainer.style.height = `${(total - 1) * CHIP_STRIDE + CHIP_HEIGHT}px`;
 
   const motions = [];
-  suggestions.forEach((text, i) => {
+  suggestions.forEach((item, i) => {
+    const isMagicCue = item && item.kind === 'magic-cue';
+    const text = typeof item === 'string' ? item : item.prompt;
     const chip = document.createElement('button');
-    chip.className = 'suggestion-chip';
+    chip.className = 'suggestion-chip' + (isMagicCue ? ' magic-cue-chip' : '');
     chip.dataset.testid = `suggestion-chip-${i}`;
     chip.style.opacity = '0';
     chip.style.transform = 'translate3d(0px, 0px, 0) scaleY(0.25)';
@@ -2764,19 +2891,33 @@ function renderSuggestionChips() {
     content.className = 'suggestion-chip-content';
     content.style.opacity = '0';
 
-    const icon = document.createElement('img');
-    icon.src = 'extracted_assets/svg/gs_prompt_suggestion_rond100_vd_theme_20.svg';
-    icon.className = 'suggestion-chip-icon';
+    // SuggestionChipsKt.java:1599-1616:
+    // If suggestion.getIcon() != null (MagicCue RemoteAction icon), render that icon;
+    // otherwise render fallbackIcon (gs_prompt_suggestion_rond100_vd_theme_20.svg)!
+    if (isMagicCue && item.iconSvg) {
+      const iconWrap = document.createElement('span');
+      iconWrap.className = 'suggestion-chip-magic-cue-icon';
+      iconWrap.innerHTML = item.iconSvg;
+      content.appendChild(iconWrap);
+    } else {
+      const icon = document.createElement('img');
+      icon.src = 'extracted_assets/svg/gs_prompt_suggestion_rond100_vd_theme_20.svg';
+      icon.className = 'suggestion-chip-icon';
+      content.appendChild(icon);
+    }
 
     const span = document.createElement('span');
     span.textContent = text;
-    content.appendChild(icon);
     content.appendChild(span);
     chip.appendChild(content);
 
     chip.addEventListener('click', (e) => {
       e.stopPropagation();
-      submitPromptToGemini(text);
+      if (isMagicCue) {
+        executeMagicCueSuggestion(item);
+      } else {
+        submitPromptToGemini(text);
+      }
     });
 
     // SuggestionChipsKt.java:1770-1780: Secondary click (right-click) opens SuggestionFeedbackDialog!
@@ -3649,6 +3790,92 @@ btnSliderMinus.addEventListener('click', () => applySensitivity(state.sensitivit
 btnSliderPlus.addEventListener('click', () => applySensitivity(state.sensitivityLevel + 1, true));
 applySensitivity(state.sensitivityLevel, false);
 
+// Optional Magic Cue Smart Actions UI & On-Demand Download
+const btnMagicCueAction = document.getElementById('btn-magic-cue-action');
+const magicCueBadge = document.getElementById('magic-cue-badge');
+const magicCueProgressWrap = document.getElementById('magic-cue-progress-wrap');
+const magicCueProgressFill = document.getElementById('magic-cue-progress-fill');
+const magicCueProgressText = document.getElementById('magic-cue-progress-text');
+
+function syncMagicCueSettingsUI() {
+  if (!btnMagicCueAction || !magicCueBadge) return;
+  if (state.magicCueDownloading) {
+    btnMagicCueAction.disabled = true;
+    btnMagicCueAction.textContent = 'Downloading...';
+    btnMagicCueAction.classList.remove('active');
+    return;
+  }
+  btnMagicCueAction.disabled = false;
+  if (!state.magicCuePackDownloaded) {
+    magicCueBadge.textContent = 'Optional · 1.2 MB';
+    magicCueBadge.classList.remove('installed');
+    btnMagicCueAction.textContent = 'Download & Enable';
+    btnMagicCueAction.classList.remove('active');
+  } else if (state.magicCueEnabled) {
+    magicCueBadge.textContent = 'Installed · Active';
+    magicCueBadge.classList.add('installed');
+    btnMagicCueAction.textContent = 'Enabled';
+    btnMagicCueAction.classList.add('active');
+  } else {
+    magicCueBadge.textContent = 'Installed · Off';
+    magicCueBadge.classList.remove('installed');
+    btnMagicCueAction.textContent = 'Enable';
+    btnMagicCueAction.classList.remove('active');
+  }
+}
+
+if (btnMagicCueAction) {
+  btnMagicCueAction.addEventListener('click', async () => {
+    if (state.magicCueDownloading) return;
+    if (!state.magicCuePackDownloaded) {
+      state.magicCueDownloading = true;
+      if (magicCueProgressWrap) magicCueProgressWrap.classList.remove('hidden');
+      if (magicCueProgressFill) magicCueProgressFill.style.width = '5%';
+      if (magicCueProgressText) magicCueProgressText.textContent = 'Starting download...';
+      syncMagicCueSettingsUI();
+
+      if (api.downloadMagicCuePack) {
+        const res = await api.downloadMagicCuePack();
+        state.magicCueDownloading = false;
+        if (res && res.ok) {
+          state.magicCuePackDownloaded = true;
+          state.magicCueEnabled = true;
+          setTimeout(() => {
+            if (magicCueProgressWrap) magicCueProgressWrap.classList.add('hidden');
+          }, 900);
+        } else if (magicCueProgressText) {
+          magicCueProgressText.textContent = 'Download failed. Try again.';
+        }
+      } else {
+        state.magicCueDownloading = false;
+        state.magicCuePackDownloaded = true;
+        state.magicCueEnabled = true;
+        if (magicCueProgressWrap) magicCueProgressWrap.classList.add('hidden');
+      }
+      syncMagicCueSettingsUI();
+      if (state.expanded) renderSuggestionChips();
+    } else {
+      const nextEnabled = !state.magicCueEnabled;
+      state.magicCueEnabled = nextEnabled;
+      if (api.setMagicCueEnabled) {
+        await api.setMagicCueEnabled(nextEnabled);
+      }
+      syncMagicCueSettingsUI();
+      if (state.expanded) renderSuggestionChips();
+    }
+  });
+}
+
+if (api.getMagicCueState) {
+  api.getMagicCueState().then((st) => {
+    if (st) {
+      state.magicCueEnabled = !!st.enabled;
+      state.magicCuePackDownloaded = !!st.downloaded;
+      syncMagicCueSettingsUI();
+    }
+  });
+}
+
 // ============================================================================
 // 9. IPC Events from Main Process & Native Wiggle Watcher
 // ============================================================================
@@ -3687,6 +3914,9 @@ function activateOverlay(data) {
   applyTheme(data.isDarkMode !== false);
 
   if (typeof data.sensitivityLevel === 'number') applySensitivity(data.sensitivityLevel, false);
+  if (typeof data.magicCueEnabled === 'boolean') state.magicCueEnabled = data.magicCueEnabled;
+  if (typeof data.magicCuePackDownloaded === 'boolean') state.magicCuePackDownloaded = data.magicCuePackDownloaded;
+  syncMagicCueSettingsUI();
 
   if (!wasActive) {
     // New session: reset per-session launch timestamp, idle-hint & interaction flags (MainScreenStateFragmentPeer.java)
@@ -3750,6 +3980,10 @@ function activateOverlay(data) {
 
   if (data.source === 'tutorial') {
     openFte('enable-mp');
+    setCursorType('select');
+    updateFloatingPromptBoxPosition(state.cursorX, state.cursorY, true);
+  } else if (data.source === 'magic-cue-setup') {
+    openFte('wiggle-adjust');
     setCursorType('select');
     updateFloatingPromptBoxPosition(state.cursorX, state.cursorY, true);
   } else if (data.source === 'shake' && wasActive) {
@@ -3876,6 +4110,29 @@ api.onSensitivityChange((lvl) => {
 api.onThemeChange((dark) => {
   applyTheme(dark);
 });
+
+if (api.onMagicCueStateChange) {
+  api.onMagicCueStateChange((st) => {
+    if (!st) return;
+    state.magicCueEnabled = !!st.enabled;
+    state.magicCuePackDownloaded = !!st.downloaded;
+    syncMagicCueSettingsUI();
+    if (state.expanded) renderSuggestionChips();
+  });
+}
+
+if (api.onMagicCueDownloadProgress) {
+  api.onMagicCueDownloadProgress((prog) => {
+    if (!prog) return;
+    if (magicCueProgressWrap) magicCueProgressWrap.classList.remove('hidden');
+    if (magicCueProgressFill && typeof prog.pct === 'number') {
+      magicCueProgressFill.style.width = `${Math.max(0, Math.min(100, prog.pct))}%`;
+    }
+    if (magicCueProgressText && prog.status) {
+      magicCueProgressText.textContent = prog.status;
+    }
+  });
+}
 
 // Render Command (⌘) keycap on macOS or Windows logo keycap on Windows in the FTE tutorial
 (function syncPlatformShortcutKeycap() {

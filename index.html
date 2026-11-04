@@ -242,6 +242,31 @@
             <span>Cursor wiggling detected</span>
           </div>
 
+          <div class="spacer-16"></div>
+          <!-- Optional Magic Cue Smart Actions (Entity Classifier) Toggle & On-Demand Download -->
+          <div id="magic-cue-settings-card" class="magic-cue-settings-card">
+            <div class="magic-cue-settings-header">
+              <div class="magic-cue-settings-info">
+                <div class="magic-cue-settings-title-row">
+                  <span class="magic-cue-settings-title">Magic Cue Smart Actions</span>
+                  <span id="magic-cue-badge" class="magic-cue-badge">Optional · 1.2 MB</span>
+                </div>
+                <p id="magic-cue-settings-desc" class="magic-cue-settings-desc">
+                  Instant action chips for emails, links, maps, calendar events, flights, and phone numbers in selected text
+                </p>
+              </div>
+              <button id="btn-magic-cue-action" class="m3-outlined-btn magic-cue-action-btn" type="button">
+                Download &amp; Enable
+              </button>
+            </div>
+            <div id="magic-cue-progress-wrap" class="magic-cue-progress-wrap hidden">
+              <div class="magic-cue-progress-bar">
+                <div id="magic-cue-progress-fill" class="magic-cue-progress-fill"></div>
+              </div>
+              <span id="magic-cue-progress-text" class="magic-cue-progress-text">Downloading...</span>
+            </div>
+          </div>
+
           <div class="spacer-24"></div>
           <div class="dialog-actions-end">
             <button id="btn-wiggle-back" class="m3-filled-btn" data-testid="back-button">Back</button>

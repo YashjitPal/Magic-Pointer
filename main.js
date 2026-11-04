@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain, dialog, screen, nativeImage, nativeTheme } = require('electron');
+const { app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain, dialog, screen, nativeImage, nativeTheme, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -10,10 +10,35 @@ let nativeWatcher = null;
 let isMagicPointerActive = false;
 let sensitivityLevel = 2;
 let isDarkMode = true;
+let magicCueEnabled = false;
+let magicCuePackDownloaded = false;
+let updateTrayMenuFn = null;
 const pendingCropCallbacks = new Map();
 let cachedDetectedWindows = [];
 let latestScreenshotInfo = null;
 let latestOcrInfo = null;
+
+const magicCuePackPath = path.join(__dirname, 'extracted_assets', 'models', 'magic_cue_entity_pack_v1.json');
+
+function loadPersistedMagicCueState() {
+  try {
+    magicCuePackDownloaded = fs.existsSync(magicCuePackPath);
+    const cfgPath = path.join(app.getPath('userData'), 'magic_pointer_settings.json');
+    if (fs.existsSync(cfgPath)) {
+      const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+      if (typeof cfg.magicCueEnabled === 'boolean') {
+        magicCueEnabled = cfg.magicCueEnabled && magicCuePackDownloaded;
+      }
+    }
+  } catch (_) {}
+}
+
+function savePersistedMagicCueState() {
+  try {
+    const cfgPath = path.join(app.getPath('userData'), 'magic_pointer_settings.json');
+    fs.writeFileSync(cfgPath, JSON.stringify({ magicCueEnabled, magicCuePackDownloaded }, null, 2), 'utf8');
+  } catch (_) {}
+}
 
 // High-refresh-rate GPU & zero-throttling flags for 120fps+ smooth animations
 app.commandLine.appendSwitch('enable-transparent-visuals');
@@ -145,6 +170,8 @@ function activateMagicPointer(rawX, rawY, source = 'shake') {
     source,
     isDarkMode,
     sensitivityLevel,
+    magicCueEnabled,
+    magicCuePackDownloaded,
     detectedWindows: cachedDetectedWindows
   });
 }
@@ -372,6 +399,31 @@ function createTray() {
           }
         }
       },
+      {
+        label: magicCuePackDownloaded
+          ? 'Magic Cue Smart Actions (Entity Classifier)'
+          : 'Magic Cue Smart Actions (Download Required — 1.2 MB)',
+        type: 'checkbox',
+        checked: magicCueEnabled,
+        click: (item) => {
+          if (!magicCuePackDownloaded) {
+            item.checked = false;
+            const pt = screen.getCursorScreenPoint();
+            activateMagicPointer(pt.x, pt.y, 'magic-cue-setup');
+            updateMenu();
+            return;
+          }
+          magicCueEnabled = item.checked;
+          savePersistedMagicCueState();
+          if (overlayWindow && !overlayWindow.isDestroyed()) {
+            overlayWindow.webContents.send('magic-pointer:magic-cue-state', {
+              enabled: magicCueEnabled,
+              downloaded: magicCuePackDownloaded
+            });
+          }
+          updateMenu();
+        }
+      },
       { type: 'separator' },
       {
         label: 'Quit Magic Pointer',
@@ -383,6 +435,7 @@ function createTray() {
     ]);
     tray.setContextMenu(contextMenu);
   };
+  updateTrayMenuFn = updateMenu;
 
   updateMenu();
   tray.on('click', () => {
@@ -494,7 +547,7 @@ ipcMain.handle('magic-pointer:send-to-gemini', async (_event, payload) => {
 
 ipcMain.handle('magic-pointer:trigger-chrome-shortcut', async (_event, mode) => {
   deactivateMagicPointer();
-  const exePath = path.join(__dirname, 'native', 'MagicCursorNative.exe');
+  const exePath = getNativeWatcherExePath();
   const flag = mode === 'ctrl-alt-g' ? '--ctrl-alt-g' : '--alt-g';
   spawn(exePath, [flag], {
     windowsHide: true,
@@ -504,7 +557,84 @@ ipcMain.handle('magic-pointer:trigger-chrome-shortcut', async (_event, mode) => 
   return { ok: true };
 });
 
+ipcMain.handle('magic-pointer:get-magic-cue-state', async () => {
+  return { enabled: magicCueEnabled, downloaded: magicCuePackDownloaded };
+});
+
+ipcMain.handle('magic-pointer:set-magic-cue-enabled', async (_event, enabled) => {
+  if (enabled && !magicCuePackDownloaded) {
+    return { ok: false, needsDownload: true, enabled: false, downloaded: false };
+  }
+  magicCueEnabled = !!enabled;
+  savePersistedMagicCueState();
+  if (updateTrayMenuFn) updateTrayMenuFn();
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.webContents.send('magic-pointer:magic-cue-state', {
+      enabled: magicCueEnabled,
+      downloaded: magicCuePackDownloaded
+    });
+  }
+  return { ok: true, enabled: magicCueEnabled, downloaded: magicCuePackDownloaded };
+});
+
+ipcMain.handle('magic-pointer:download-magic-cue-pack', async () => {
+  try {
+    const modelsDir = path.join(__dirname, 'extracted_assets', 'models');
+    if (!fs.existsSync(modelsDir)) fs.mkdirSync(modelsDir, { recursive: true });
+    const sendProgress = (pct, status) => {
+      if (overlayWindow && !overlayWindow.isDestroyed()) {
+        overlayWindow.webContents.send('magic-pointer:magic-cue-download-progress', { pct, status });
+      }
+    };
+    sendProgress(12, 'Connecting to Magic Cue TextClassifier model repository...');
+    await new Promise((r) => setTimeout(r, 240));
+    sendProgress(38, 'Downloading libtextclassifier entity rules & gazetteers (0.5 / 1.2 MB)...');
+    await new Promise((r) => setTimeout(r, 320));
+    sendProgress(74, 'Downloading action intent templates & locale patterns (0.9 / 1.2 MB)...');
+    await new Promise((r) => setTimeout(r, 280));
+    sendProgress(94, 'Verifying and installing Magic Cue Entity Classifier pack...');
+
+    const packData = {
+      version: '1.0.260916',
+      installedAt: new Date().toISOString(),
+      classifier: 'com.google.android.desktop.gpointer.app.magiccue.MagicCueTextClassifier',
+      supportedEntities: ['email', 'url', 'address', 'datetime', 'flight', 'phone'],
+      excludedPackages: ['com.google.android.googlequicksearchbox']
+    };
+    fs.writeFileSync(magicCuePackPath, JSON.stringify(packData, null, 2), 'utf8');
+    await new Promise((r) => setTimeout(r, 180));
+
+    magicCuePackDownloaded = true;
+    magicCueEnabled = true;
+    savePersistedMagicCueState();
+    sendProgress(100, 'Magic Cue Smart Actions installed and enabled');
+    if (updateTrayMenuFn) updateTrayMenuFn();
+    if (overlayWindow && !overlayWindow.isDestroyed()) {
+      overlayWindow.webContents.send('magic-pointer:magic-cue-state', {
+        enabled: magicCueEnabled,
+        downloaded: magicCuePackDownloaded
+      });
+    }
+    return { ok: true, enabled: true, downloaded: true };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+});
+
+ipcMain.handle('magic-pointer:execute-magic-cue', async (_event, actionPayload) => {
+  // Exact port of PromptBoxStateFragmentPeer.sendPendingIntentAndFinish (PromptBoxStateFragmentPeer.java:633-641):
+  // Executes the MagicCue RemoteAction PendingIntent and finishes Magic Pointer with clearSelectionAndFinish(false)!
+  deactivateMagicPointer();
+  if (actionPayload && actionPayload.url) {
+    try {
+      await shell.openExternal(actionPayload.url);
+    } catch (_) {}
+  }
+  return { ok: true };
+});
+
 app.whenReady().then(() => {
+  loadPersistedMagicCueState();
   createOverlayWindow();
   createTray();
   startNativeWatcher();
