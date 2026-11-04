@@ -325,6 +325,7 @@ button, textarea, input, div, a, span, canvas, img, svg, path, p, h1, h2, kbd {
   align-items: flex-start;
   gap: 12px; /* PROMPT_BOX_SELECTED_AOI_SPACING = 12dp */
   padding: 16px 0 0 0; /* PROMPT_BOX_SELECTED_AOIS_DISPLAY_PADDING_TOP = 16dp */
+  max-width: 452px; /* 5 tiles * 80dp + 4 gaps * 12dp = 448dp (max 5 tiles per row inside 560dp PromptBox!) */
 }
 
 .aoi-thumbnails-list {

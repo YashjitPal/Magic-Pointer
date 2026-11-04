@@ -2586,6 +2586,7 @@ function renderSelectedAOIsAndChips(opts = {}) {
 
       if (item.dataUrl) {
         const img = document.createElement('img');
+        img.decoding = 'sync';
         img.src = item.dataUrl;
         thumb.appendChild(img);
       } else {
