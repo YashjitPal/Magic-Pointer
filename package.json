@@ -1,0 +1,13 @@
+{
+  "name": "googlebook-magic-pointer-windows",
+  "version": "1.0.260916",
+  "description": "Googlebook Magic Pointer (com.google.android.desktop.gpointer.app) extracted and connected to Gemini in Chrome for Windows",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "dependencies": {
+    "electron": "^35.0.0",
+    "lottie-web": "^5.12.2"
+  }
+}

@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Magic Pointer</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="theme-dark">
+  <!-- Fullscreen overlay container (hidden when inactive) -->
+  <div id="magic-root" class="magic-root hidden">
+    <!-- Scrim + Cutout Canvas for Screen Region Selection (OVERLAY_ALPHA = 0.32f, 100ms fade-in) -->
+    <canvas id="scrim-canvas" class="scrim-canvas"></canvas>
+
+    <!-- WebGL2 Google EnergyShader Canvas (AoiCard & SuggestionChips Entry Animation) -->
+    <canvas id="energy-shader-canvas" class="energy-shader-canvas"></canvas>
+
+    <!-- Selected AOI Cards overlay layer -->
+    <div id="aoi-cards-layer" class="aoi-cards-layer"></div>
+
+    <!-- Detached Floating PromptBox Wrapper (MainScreen.kt -> PromptBox.kt) -->
+    <div id="floating-prompt-anchor" class="floating-prompt-anchor" data-testid="prompt">
+      <!-- ExpandedState (PromptBoxKt.smali lines 21500-22230: Column spacedBy 8dp -> PromptBox + SuggestionChips) -->
+      <div id="expanded-state-wrapper" class="expanded-state-wrapper">
+        <!-- PromptBox Pill (241dp no-content -> 268dp..396dp with content, 28dp radius, surfaceContainerHighest) -->
+        <div id="prompt-box" class="prompt-box state-collapsed-empty no-transition" data-testid="prompt-box" tabindex="0">
+          <!-- ContentArea (PromptBoxKt.smali lines 2391-3700: Row(padding(start=16dp, end=4dp), spacedBy=4dp) -> SelectedAOIsDisplay + ExitActions) -->
+          <div id="content-area" class="content-area hidden">
+            <!-- SelectedAOIsDisplay (FlowRow(padding(top=16dp), spacedBy=12dp): 80x80dp thumbnails + 80x80dp dashed AddAoiThumbnail) -->
+            <div id="selected-aois-display" class="selected-aois-display">
+              <div id="aoi-thumbnails-list" class="aoi-thumbnails-list"></div>
+              <!-- Dashed 80x80dp AddAoiThumbnail (PromptBox.kt:1059: dashOn=4dp, dashOff=4dp, radius=16dp, 1dp outlineVariant, 24dp Add icon) -->
+              <div id="add-aoi-tile-wrapper" class="add-aoi-thumbnail-wrapper">
+                <button id="btn-add-aoi-tile" class="add-aoi-thumbnail" data-testid="prompt-box-add-aoi-thumbnail" data-tooltip="Add content" aria-label="Add item">
+                  <img src="extracted_assets/svg/ic_add_24.svg" alt="Add item" class="icon-svg icon-variant add-aoi-plus-icon" />
+                </button>
+              </div>
+            </div>
+
+            <!-- ExitActions (PromptBoxKt.smali lines 10300-11260: width=76dp, height=40dp, padding(start=4dp, top=4dp, end=4dp, bottom=0dp)) -->
+            <div id="exit-actions-pill" class="exit-actions-pill">
+              <button id="btn-collapse-save" class="exit-action-btn" data-testid="prompt-box-save-draft-button" data-tooltip="Collapse and save" aria-label="Collapse and save">
+                <img src="extracted_assets/svg/gs_north_east_24.svg" alt="Collapse and save" class="icon-svg" />
+              </button>
+              <button id="btn-clear-close" class="exit-action-btn" data-testid="prompt-box-exit-button" data-tooltip="Clear and close" aria-label="Clear and close">
+                <img src="extracted_assets/svg/ic_close_24.svg" alt="Clear and close" class="icon-svg" />
+              </button>
+            </div>
+          </div>
+
+          <!-- ContextControls Row (PromptBoxKt.smali lines 33316-33410: padding left=20dp/8dp, right=20dp/8dp, top=8dp, bottom=8dp) -->
+          <div id="context-controls" class="context-controls">
+            <div id="add-btn-container" class="add-btn-container hidden">
+              <button id="btn-add-content" class="icon-btn add-content-btn" data-testid="prompt-box-add-aoi-button" aria-label="Add item">
+                <img src="extracted_assets/svg/ic_add_24.svg" alt="Add content" class="icon-svg icon-variant" />
+              </button>
+            </div>
+
+            <div class="prompt-input-wrapper">
+              <textarea
+                id="prompt-input"
+                class="prompt-input"
+                data-testid="prompt-box-text-field"
+                rows="1"
+                placeholder="Point and select to ask Gemini"
+              ></textarea>
+              <div id="prompt-scrollbar-thumb" class="prompt-scrollbar-thumb hidden"></div>
+            </div>
+
+            <button id="btn-send-prompt" class="icon-btn send-prompt-btn hidden" data-testid="prompt-box-send-button" data-tooltip="Send" aria-label="Send">
+              <img src="extracted_assets/svg/gs_send_fill1rond100_20.svg" alt="Send" class="icon-svg icon-variant" />
+            </button>
+          </div>
+        </div>
+
+        <!-- SuggestionChips Box (8dp below PromptBox, up to 3 chips, 48dp height, 24dp radius, spring-physics unfold) -->
+        <div id="suggestion-chips-container" class="suggestion-chips-container hidden"></div>
+      </div>
+
+      <!-- Collapsed AOI Thumbnail Fan (AoiThumbnailFanKt.smali: 72dp x 60dp, padding 8dp, replaces ExpandedState when isCollapsed=true) -->
+      <div id="aoi-thumbnail-fan" class="aoi-thumbnail-fan hidden" data-testid="aoi-thumbnail-fan-aoi"></div>
+    </div>
+
+    <!-- Material 3 PlainTooltip (TooltipAnchorPosition.Above, ComposableSingletons$PromptBoxKt.java) -->
+    <div id="m3-plain-tooltip" class="m3-plain-tooltip hidden" role="tooltip"></div>
+
+    <!-- Googlebook Native GPointerSnackbarHost (SNACKBAR_HEIGHT = 48dp, SNACKBAR_OUTER_PADDING_BOTTOM = 16dp, CircleShape, inverseSurface) -->
+    <div id="bottom-snackbar" class="gpointer-snackbar hidden">
+      <div class="snackbar-content-row">
+        <div id="snackbar-left-group" class="snackbar-left-group">
+          <img id="snackbar-icon" src="extracted_assets/svg/gs_error_rond100_vd_theme_24.svg" alt="" class="snackbar-icon hidden" />
+          <span id="snackbar-message-text" class="snackbar-message-text">
+            Press <kbd class="keycap">esc</kbd> to exit
+          </span>
+        </div>
+        <button id="snackbar-action-btn" class="snackbar-action-btn hidden">Settings</button>
+      </div>
+    </div>
+
+    <!-- Googlebook Native FeedbackButtonAndSystemKeyStatus (Alignment.BottomStart, padding 16dp) -->
+    <div class="bottom-left-feedback-wrap">
+      <button id="btn-feedback" class="feedback-icon-btn hidden" data-testid="feedback-button" title="Send feedback">
+        <!-- Material Icons Filled Feedback (24dp) from FeedbackButtonAndSystemKeyStatus -->
+        <svg class="feedback-svg" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+          <path d="M20 2H4c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-7 12h-2v-2h2v2zm0-4h-2V6h2v4z"/>
+        </svg>
+      </button>
+    </div>
+
+    <!-- Googlebook Native ShakeInterventionScreen (ShakeInterventionScreenKt.smali: TopEnd, padding top=8dp end=24dp, width=396dp, radius=28dp, dim=0.38f) -->
+    <div id="shake-intervention-backdrop" class="dialog-topend-backdrop hidden" data-testid="shake-intervention-backdrop">
+      <div id="shake-intervention-card" class="gpointer-topend-card shake-intervention-card" data-testid="shake-intervention-card">
+        <h2 class="dialog-title-large">Change cursor wiggling sensitivity?</h2>
+        <div class="spacer-20"></div>
+        <p class="shake-intervention-desc">You can also turn off wiggling your cursor to start Magic Pointer</p>
+        <div class="spacer-32"></div>
+        <div class="dialog-actions-space-between">
+          <button id="btn-shake-no-thanks" class="m3-outlined-btn" data-testid="shake-no-thanks-button">No thanks</button>
+          <button id="btn-shake-settings" class="m3-filled-btn" data-testid="shake-settings-button">Settings</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Googlebook Native FirstTimeExperienceScreen (FirstTimeExperienceScreenKt.smali: TopEnd, padding top=8dp end=24dp, width=396dp, radius=28dp, dim=0.38f) -->
+    <div id="fte-modal-backdrop" class="dialog-topend-backdrop hidden" data-testid="fte-background">
+      <div id="fte-card" class="gpointer-topend-card fte-card" data-testid="fte-card">
+        <!-- STEP 1: EnableMagicPointerScreen (lines 467-1095 of FirstTimeExperienceScreenKt.smali) -->
+        <div id="fte-screen-enable-mp" class="fte-screen-step hidden">
+          <h2 class="dialog-title-large">Point to ask Gemini</h2>
+          <div class="spacer-20"></div>
+          <div class="swatchie-banner-box" data-testid="pointer-swatchie-banner">
+            <div id="lottie-pointer-banner" class="lottie-container"></div>
+            <button class="swatchie-play-pause-btn" data-target="pointer" data-testid="play-pause-button" title="Pause animation">
+              <svg class="play-pause-svg" viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
+              </svg>
+            </button>
+          </div>
+          <div class="spacer-24"></div>
+          <div class="fte-feature-row">
+            <img src="extracted_assets/svg/magic_pointer_icon.svg" alt="" class="fte-feature-icon" />
+            <p class="fte-feature-text">With Magic Pointer, point at or drag to select objects on your screen and get help from Gemini</p>
+          </div>
+          <div class="spacer-16"></div>
+          <div class="fte-feature-row" data-testid="shortcut-row">
+            <svg class="fte-feature-icon" viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
+              <path d="M20 5H4c-1.1 0-1.99.9-1.99 2L2 17c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm-9 3h2v2h-2V8zm0 3h2v2h-2v-2zM8 8h2v2H8V8zm0 3h2v2H8v-2zm-1 2H5v-2h2v2zm0-3H5V8h2v2zm9 7H8v-2h8v2zm0-4h-2v-2h2v2zm0-3h-2V8h2v2zm3 3h-2v-2h2v2zm0-3h-2V8h2v2z"/>
+            </svg>
+            <p class="fte-feature-text">
+              Press
+              <span id="fte-meta-keycap" class="fte-keycap" title="Windows key">
+                <svg class="fte-keycap-icon" viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                  <path d="M3 3h8.5v8.5H3V3zm9.5 0H21v8.5h-8.5V3zM3 12.5h8.5V21H3v-8.5zm9.5 0H21V21h-8.5v-8.5z"/>
+                </svg>
+              </span>
+              +
+              <span class="fte-keycap">g</span>
+              to use Magic Pointer
+            </p>
+          </div>
+          <div class="spacer-16"></div>
+          <p class="fte-legal-text" data-testid="legal-text">
+            You can turn off Magic Pointer at any time in <a href="#" id="link-fte-settings" class="fte-link">Settings</a>.
+            <a href="https://policies.google.com/terms" target="_blank" rel="noreferrer" class="fte-link">Google Terms</a> and the
+            <a href="https://support.google.com/gemini/answer/13594961?hl=en#privacy_notice" target="_blank" rel="noreferrer" class="fte-link">Gemini Apps Privacy Notice</a> apply.
+            <a href="https://support.google.com/googlebook?p=magic_pointer#topic=17073655" target="_blank" rel="noreferrer" class="fte-link">Learn how Magic Pointer works</a>
+          </p>
+          <div class="spacer-24"></div>
+          <div class="dialog-actions-end">
+            <button id="btn-fte-no-thanks" class="m3-filled-btn" data-testid="no-thanks-button">No thanks</button>
+            <button id="btn-fte-get-started" class="m3-filled-btn" data-testid="get-started-button">Turn on</button>
+          </div>
+        </div>
+
+        <!-- STEP 2: EnableWiggleGestureScreen (lines 5061-9460 of FirstTimeExperienceScreenKt.smali) -->
+        <div id="fte-screen-enable-wiggle" class="fte-screen-step hidden">
+          <h2 class="dialog-title-large">Allow wiggling your cursor to start Magic Pointer?</h2>
+          <div class="spacer-20"></div>
+          <div class="swatchie-banner-box" data-testid="wiggle-swatchie-banner">
+            <div id="lottie-wiggle-intro-banner" class="lottie-container"></div>
+            <button class="swatchie-play-pause-btn" data-target="wiggle-intro" data-testid="play-pause-button" title="Pause animation">
+              <svg class="play-pause-svg" viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
+              </svg>
+            </button>
+          </div>
+          <div class="spacer-24"></div>
+          <p class="fte-body-text">
+            You can <a href="#" id="link-wiggle-settings" class="fte-link">go to Settings</a> at any time to turn off wiggling your cursor
+          </p>
+          <div class="spacer-24"></div>
+          <div class="dialog-actions-end">
+            <button id="btn-wiggle-disable" class="m3-filled-btn" data-testid="wiggle-disable-button">Don't allow</button>
+            <button id="btn-wiggle-allow" class="m3-filled-btn">Allow</button>
+          </div>
+        </div>
+
+        <!-- STEP 3: WiggleAdjustmentScreen (lines 17990-21955 of FirstTimeExperienceScreenKt.smali) -->
+        <div id="fte-screen-wiggle-adjust" class="fte-screen-step">
+          <h2 class="dialog-title-large">Try wiggling your cursor</h2>
+          <div class="spacer-16"></div>
+          <div class="swatchie-banner-box" data-testid="wiggle-swatchie-banner">
+            <div id="lottie-wiggle-level-banner" class="lottie-container"></div>
+            <button class="swatchie-play-pause-btn" data-target="wiggle-level" data-testid="play-pause-button" title="Pause animation">
+              <svg class="play-pause-svg" viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
+              </svg>
+            </button>
+          </div>
+          <div class="spacer-16"></div>
+          <p class="fte-body-text">Quickly move your cursor several times on your screen to test and adjust wiggling sensitivities</p>
+          <div class="spacer-16"></div>
+
+          <!-- Slider Row: (-) IconButton + M3 Discrete Slider (0..3, steps=2) + (+) IconButton (SLIDER_SPACING_DP = 8dp) -->
+          <div class="wiggle-slider-row">
+            <button id="btn-slider-minus" class="slider-step-btn" title="Remove">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                <path d="M19 13H5v-2h14v2z"/>
+              </svg>
+            </button>
+            <div class="m3-slider-container">
+              <input id="sensitivity-slider" type="range" min="0" max="3" step="1" value="2" class="m3-slider" />
+              <div class="m3-slider-ticks">
+                <span class="tick-dot" data-lvl="0"></span>
+                <span class="tick-dot" data-lvl="1"></span>
+                <span class="tick-dot" data-lvl="2"></span>
+                <span class="tick-dot" data-lvl="3"></span>
+              </div>
+            </div>
+            <button id="btn-slider-plus" class="slider-step-btn" title="Add">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
+              </svg>
+            </button>
+          </div>
+
+          <!-- Wiggle Detected Indicator Banner (height=40dp, radius=8dp, surfaceBright, 1500ms duration) -->
+          <div id="wiggle-detected-banner" class="wiggle-detected-banner hidden">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+              <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+            </svg>
+            <span>Cursor wiggling detected</span>
+          </div>
+
+          <div class="spacer-24"></div>
+          <div class="dialog-actions-end">
+            <button id="btn-wiggle-back" class="m3-filled-btn" data-testid="back-button">Back</button>
+            <button id="btn-done-fte" class="m3-filled-btn" data-testid="turn-on-button">Done</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Googlebook Native SuggestionFeedbackDialog (SuggestionFeedbackStaticValues.smali: 512dp x 208dp, 28dp radius, surfaceContainerHigh) -->
+    <div id="feedback-dialog-backdrop" class="center-dialog-backdrop hidden">
+      <div id="feedback-dialog" class="feedback-dialog" data-testid="feedback-dialog">
+        <button id="btn-close-feedback" class="feedback-close-btn" data-testid="feedback-dialog-close-button" title="Close">
+          <img src="extracted_assets/svg/ic_close_24.svg" alt="Close" class="icon-svg" />
+        </button>
+
+        <!-- Initial Thumb Up / Thumb Down View -->
+        <div id="feedback-step-rate" class="feedback-step-rate">
+          <h2 class="dialog-title-large">Give feedback on suggestion</h2>
+          <div class="spacer-16"></div>
+          <p class="feedback-desc">This suggestion is private to you. It’s based on content you’ve selected.</p>
+          <div class="spacer-24"></div>
+          <div class="feedback-thumb-actions">
+            <button id="btn-thumb-up" class="feedback-thumb-btn" data-testid="feedback-dialog-thumb-up-button" title="Good Suggestion">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                <path d="M1 21h4V9H1v12zm22-11c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z"/>
+              </svg>
+            </button>
+            <button id="btn-thumb-down" class="feedback-thumb-btn" data-testid="feedback-dialog-thumb-down-button" title="Bad Suggestion">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                <path d="M15 3H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05c-.09.23-.14.47-.14.73v2c0 1.1.9 2 2 2h6.31l-.95 4.57-.03.32c0 .41.17.79.44 1.06L9.83 23l6.59-6.59c.36-.36.58-.86.58-1.41V5c0-1.1-.9-2-2-2zm4 0v12h4V3h-4z"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- Expanded Bad Suggestion / General Feedback Details View (FEEDBACK_DIALOG_WIDTH = 412dp) -->
+        <div id="feedback-step-details" class="feedback-step-details hidden">
+          <h2 class="dialog-title-large">Bad suggestion</h2>
+          <div class="spacer-16"></div>
+          <div id="feedback-tags-grid" class="feedback-tags-grid">
+            <button class="feedback-tag-chip" data-tag="Inaccurate">Inaccurate</button>
+            <button class="feedback-tag-chip" data-tag="Irrelevant">Irrelevant</button>
+            <button class="feedback-tag-chip" data-tag="Too slow">Too slow</button>
+            <button class="feedback-tag-chip" data-tag="Confusing">Confusing</button>
+            <button class="feedback-tag-chip" data-tag="Hard to understand">Hard to understand</button>
+            <button class="feedback-tag-chip" data-tag="Offensive / Unsafe">Offensive / Unsafe</button>
+            <button class="feedback-tag-chip" data-tag="Legal concern">Legal concern</button>
+            <button class="feedback-tag-chip" data-tag="Other">Other</button>
+          </div>
+          <div class="spacer-16"></div>
+          <textarea id="feedback-comment-input" class="feedback-comment-input" rows="3" placeholder="Additional comment (Optional)"></textarea>
+          <div class="spacer-12"></div>
+          <p class="fte-legal-text">
+            Include your query and the corresponding model responses to help improve Magic Pointer for everyone, in accordance with the
+            <a href="https://policies.google.com/privacy" target="_blank" rel="noreferrer" class="fte-link">Google Privacy Policy</a>.
+          </p>
+          <div class="spacer-16"></div>
+          <div class="dialog-actions-end">
+            <button id="btn-submit-feedback" class="m3-filled-btn">Submit</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Custom Floating Magic Pointer Cursor -->
+    <div id="custom-cursor" class="custom-cursor">
+      <img id="custom-cursor-img" src="extracted_assets/svg/magic_pointer_crosshair_cursor_image.svg" alt="" />
+    </div>
+  </div>
+
+  <script src="node_modules/lottie-web/build/player/lottie.min.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>

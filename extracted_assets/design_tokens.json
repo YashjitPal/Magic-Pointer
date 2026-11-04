@@ -1,0 +1,123 @@
+{
+  "package": "com.google.android.desktop.gpointer.app",
+  "version": "1.0.260916",
+  "cursors": {
+    "select": {
+      "svg": "svg/magic_pointer_select_cursor_image.svg",
+      "widthDp": 36,
+      "heightDp": 36,
+      "hotSpotX": 6,
+      "hotSpotY": 6
+    },
+    "crosshair": {
+      "svg": "svg/magic_pointer_crosshair_cursor_image.svg",
+      "widthDp": 36,
+      "heightDp": 36,
+      "hotSpotX": 18,
+      "hotSpotY": 17
+    },
+    "ibeam": {
+      "svg": "svg/magic_pointer_ibeam_cursor_image.svg",
+      "widthDp": 36,
+      "heightDp": 36,
+      "hotSpotX": 14,
+      "hotSpotY": 17
+    }
+  },
+  "easings": {
+    "CROS_STANDARD_ACCELERATION_EASING": "cubic-bezier(0.4, 0.0, 1.0, 1.0)",
+    "CROS_STANDARD_EASING": "cubic-bezier(0.4, 0.0, 0.0, 0.97)",
+    "STANDARD_EASING": "cubic-bezier(0.2, 0.0, 0.0, 1.0)",
+    "EMPHASIZED_ACCELERATE_EASING": "cubic-bezier(0.3, 0.0, 0.8, 0.15)",
+    "GM_EMPHASIZED": "path(M 0,0 C 0.05, 0, 0.133333, 0.06, 0.166666, 0.4 C 0.208333, 0.82, 0.25, 1, 1, 1)"
+  },
+  "mainScreen": {
+    "PROMPT_BOX_SCREEN_BOUNDS_OFFSET_DP": 16,
+    "PROMPT_BOX_CURSOR_X_OFFSET_DP": 10,
+    "PROMPT_BOX_CURSOR_Y_OFFSET_DP": 16,
+    "PROMPT_BOX_SELECT_CURSOR_X_OFFSET_DP": 20,
+    "PROMPT_BOX_SELECT_CURSOR_Y_OFFSET_DP": 26,
+    "CURSOR_FOLLOW_POSITION_DURATION_MILLIS": 200,
+    "OVERLAY_ALPHA": 0.32,
+    "SELECTED_AOI_BORDER_RADIUS_DP": 12,
+    "SNACKBAR_HEIGHT_DP": 48
+  },
+  "promptBox": {
+    "PROMPT_BOX_EMPTY_WIDTH_DP": 241,
+    "PROMPT_BOX_EMPTY_WITH_ADD_ICON_WIDTH_DP": 260,
+    "PROMPT_BOX_MIN_WIDTH_WITH_CONTENT_DP": 320,
+    "PROMPT_BOX_MAX_WIDTH_DP": 560,
+    "PROMPT_BOX_BORDER_RADIUS_DP": 28,
+    "PROMPT_BOX_PADDING_DP": 12,
+    "PROMPT_BOX_SPACING_DP": 16,
+    "PROMPT_BOX_CONTENT_AREA_SPACING_DP": 4,
+    "PROMPT_BOX_CONTENT_AREA_START_PADDING_DP": 16,
+    "PROMPT_BOX_CONTENT_AREA_END_PADDING_DP": 4,
+    "PROMPT_BOX_SELECTED_AOI_SPACING_DP": 12,
+    "PROMPT_BOX_SELECTED_AOI_TOP_PADDING_DP": 16,
+    "PROMPT_BOX_SELECTED_AOI_THUMBNAIL_SIZE_DP": 80,
+    "PROMPT_BOX_SELECTED_AOI_THUMBNAIL_BORDER_WIDTH_DP": 1,
+    "PROMPT_BOX_SELECTED_AOI_THUMBNAIL_BORDER_RADIUS_DP": 16,
+    "PROMPT_BOX_ADD_AOI_THUMBNAIL_BORDER_DASH_ON_DP": 4,
+    "PROMPT_BOX_ADD_AOI_THUMBNAIL_BORDER_DASH_OFF_DP": 4,
+    "PROMPT_BOX_MAX_AOI_COUNT": 10,
+    "PROMPT_BOX_REMOVE_AOI_BUTTON_SIZE_DP": 20,
+    "PROMPT_BOX_REMOVE_AOI_ICON_SIZE_DP": 18,
+    "PROMPT_BOX_EXIT_ACTIONS_WIDTH_DP": 76,
+    "PROMPT_BOX_EXIT_ACTIONS_HEIGHT_DP": 40,
+    "PROMPT_BOX_EXIT_ACTIONS_PADDING_DP": 4,
+    "PROMPT_BOX_EXIT_ACTION_CONTAINER_SIZE_DP": 36,
+    "PROMPT_BOX_CONTROLS_PADDING_DP": 8,
+    "PROMPT_BOX_CONTROLS_SPACING_DP": 16,
+    "PROMPT_BOX_ADD_ICON_SPACING_DP": 4,
+    "PROMPT_BOX_TEXT_FIELD_FONT_SIZE_SP": 14,
+    "PROMPT_BOX_TEXT_FIELD_MIN_HEIGHT_DP": 20,
+    "PROMPT_BOX_TEXT_FIELD_MAX_HEIGHT_DP": 96,
+    "PROMPT_BOX_TEXT_FIELD_VERTICAL_PADDING_DP": 8,
+    "PROMPT_BOX_TEXT_FIELD_MAX_HORIZONTAL_PADDING_DP": 20,
+    "PROMPT_BOX_SUGGESTION_CHIPS_SPACING_DP": 8,
+    "PROMPT_BOX_EXPANDED_ENTRY_ANIMATION_DURATION_MILLIS": 300,
+    "PROMPT_BOX_EXPANDED_EXIT_ANIMATION_DURATION_MILLIS": 200,
+    "PROMPT_BOX_TEXT_BOX_ICON_ENTRY_ANIMATION_DURATION_MILLIS": 220,
+    "PROMPT_BOX_TEXT_BOX_ICON_EXIT_ANIMATION_DURATION_MILLIS": 90
+  },
+  "suggestionChips": {
+    "SUGGESTION_CHIP_CORNER_RADIUS_DP": 24,
+    "SUGGESTION_CHIP_HEIGHT_DP": 48,
+    "SUGGESTION_CHIP_ICON_SIZE_DP": 20,
+    "SUGGESTION_CHIP_PADDING_HORIZONTAL_DP": 16,
+    "SUGGESTION_CHIP_PADDING_VERTICAL_DP": 10,
+    "SUGGESTION_CHIP_BORDER_WIDTH_DP": 1,
+    "SUGGESTION_CHIP_FADE_IN_DURATION_MS": 50,
+    "SUGGESTION_CHIP_EXIT_TRANSLATION_ANIMATION_DURATION_MS": 150
+  },
+  "aoiThumbnailFan": {
+    "AOI_THUMBNAIL_FAN_WIDTH_DP": 72,
+    "AOI_THUMBNAIL_FAN_HEIGHT_DP": 60,
+    "AOI_THUMBNAIL_FAN_PADDING_DP": 8,
+    "AOI_THUMBNAIL_FAN_FRONT_THUMBNAIL_SIZE_DP": 48,
+    "AOI_THUMBNAIL_FAN_FRONT_THUMBNAIL_BORDER_RADIUS_DP": 10.5,
+    "AOI_THUMBNAIL_FAN_MIDDLE_THUMBNAIL_SIZE_DP": 44,
+    "AOI_THUMBNAIL_FAN_MIDDLE_THUMBNAIL_BORDER_RADIUS_DP": 9,
+    "AOI_THUMBNAIL_FAN_BACK_THUMBNAIL_SIZE_DP": 40,
+    "AOI_THUMBNAIL_FAN_BACK_THUMBNAIL_BORDER_RADIUS_DP": 8.5,
+    "AOI_THUMBNAIL_FAN_THUMBNAIL_X_OFFSET_DP": 16,
+    "AOI_THUMBNAIL_FAN_MIDDLE_THUMBNAIL_Y_OFFSET_DP": 1,
+    "AOI_THUMBNAIL_FAN_BACK_THUMBNAIL_Y_OFFSET_DP": 4,
+    "AOI_THUMBNAIL_FAN_THUMBNAIL_ROTATION_DEG": 8
+  },
+  "strings": {
+    "text_field_placeholder_text": "Ask Gemini",
+    "text_field_placeholder_text_selection_mode": "Point and select to ask Gemini",
+    "add_content_button_tooltip": "Add content",
+    "add_another_aoi_content_description": "Add item",
+    "send_button_tooltip": "Send",
+    "save_draft_and_exit_button_tooltip": "Collapse and save",
+    "exit_button_tooltip": "Clear and close",
+    "remove_selected_aoi_content_description": "Remove",
+    "idle_exit_hint_message": "Press esc to exit",
+    "multi_select_toast_message": "Hold ctrl to select multiple objects",
+    "first_time_experience_enable_magic_pointer_screen_title": "Point to ask Gemini",
+    "first_time_experience_enable_magic_pointer_screen_desc1": "With Magic Pointer, point at or drag to select objects on your screen and get help from Gemini"
+  }
+}

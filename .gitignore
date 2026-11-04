@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Reverse-engineering & decompilation working directories / large APK bundles (>100MB)
+apkm_bundle/
+apk_decoded_base/
+apk_decoded_en/
+apk_decoded_mdpi/
+apk_decoded_other/
+apk_unpacked/
+decompiled_src/
+jadx_bin/
+jadx_cli/
+apktool.jar
+base.apk
+magic-pointer-1.0.260916.apkm
+extracted_assets/mediapipe_pkg/
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+*.log
