@@ -1130,10 +1130,27 @@ function processOcrResultIntoTextAOIs(ocrData) {
     parsedText: block
   }));
 
-  if (state.active && !state.isDraggingAOI && !state.isTextSelecting) {
-    updateHoveredAoiForCursor(state.cursorX, state.cursorY);
-    const hitEl = document.elementFromPoint(state.cursorX, state.cursorY);
-    updateCursorTypeForTarget(hitEl);
+  if (state.active) {
+    if (!state.isDraggingAOI && !state.isTextSelecting) {
+      updateHoveredAoiForCursor(state.cursorX, state.cursorY);
+      const hitEl = document.elementFromPoint(state.cursorX, state.cursorY);
+      updateCursorTypeForTarget(hitEl);
+    }
+    // Backfill ocrText on any already-selected screen AOIs whose OCR hadn't arrived yet when clicked/dragged!
+    let backfilled = false;
+    for (const aoi of state.selectedAOIs) {
+      if (aoi.type === 'screen' && aoi.rect && !aoi.ocrText) {
+        const contained = fetchContainedOcrTextForRect(aoi.rect);
+        if (contained) {
+          aoi.ocrText = contained;
+          state.llmChipsCache.clear();
+          backfilled = true;
+        }
+      }
+    }
+    if (backfilled && state.expanded && !state.isCollapsed) {
+      renderSuggestionChips();
+    }
   }
 }
 
@@ -2810,6 +2827,182 @@ function getMagicCueSuggestionsForOcrText(rawText) {
   return cues.slice(0, 2); // MAX_MAGIC_CUE_SUGGESTIONS = 2
 }
 
+// Instant local context-aware suggestion engine based on Google's 20 domain examples in `action_suggestions_prompt` (strings.xml:33)
+function buildInstantContextualGeminiPrompts(ocrText, visualLabels, count, hasFiles, hasTextAoi) {
+  const ocr = (ocrText || '').trim();
+  const ocrLower = ocr.toLowerCase();
+  const cleanLabel = (l) => String(l || '').split(',')[0].replace(/_/g, ' ').trim();
+  const topVisual = cleanLabel(visualLabels && visualLabels[0]);
+  const allVisualText = (visualLabels || []).map(cleanLabel).join(' ').toLowerCase();
+  const pool = [];
+  const add = (s) => {
+    if (!s || s.length < 6 || s.length > 45) return;
+    if (!pool.some((x) => x.toLowerCase() === s.toLowerCase())) pool.push(s);
+  };
+
+  if (count > 1) {
+    if (topVisual && !ocr) {
+      add(`Compare these ${topVisual}s`);
+      add('Which of these is the best option?');
+      add('Visualize how these look together');
+    } else if (/[$€£¥₹]\s*\d+|\b(price|buy|cart|review|rating)\b/i.test(ocrLower)) {
+      add('Compare these products');
+      add('Get recommendation based on reviews');
+      add('Which one is the best value?');
+    } else if (/\b(resume|cv|experience|role|job|candidate)\b/i.test(ocrLower)) {
+      add('Compare my resume to this role');
+      add('Suggest resume improvements');
+      add('Draft a cover letter for this job');
+    } else {
+      add(`Compare and synthesize these ${count} items`);
+      add('Summarize common themes across these');
+      add('Create an action plan combining these');
+    }
+    return pool.slice(0, 3);
+  }
+
+  if (hasFiles) {
+    return [
+      'Summarize key takeaways from this file',
+      'Extract action items and important details',
+      'Rewrite or format this into a clean table'
+    ];
+  }
+
+  // 1. Code / Terminal / Error Stack Trace (Example 18)
+  if (/\b(error|exception|traceback|syntaxerror|typeerror|referenceerror|nullpointer|failed|enoent|ebusy|err_)\b/i.test(ocrLower)) {
+    add('Help me fix this error');
+    add('Explain what caused this bug');
+    add('Rewrite this code without errors');
+  } else if (
+    /\b(function|const |let |var |import |export |class |interface |def |return |async |await |public |private |console\.|print\(|SELECT |FROM |WHERE )\b/.test(ocr) ||
+    /[{};()=>]{2,}/.test(ocr)
+  ) {
+    add('Explain what this code does');
+    add('Suggest improvements to this code');
+    add('Write documentation for this code');
+  }
+
+  // 2. Math / Equations / Homework
+  if (/[=+\-*/^]{2,}|\b(solve|equation|integral|derivative|matrix|theorem|calculus|algebra|physics)\b/i.test(ocrLower)) {
+    add('Solve this step by step');
+    add('Explain the formula used here');
+    add('Give me similar practice problems');
+  }
+
+  // 3. System Notification / Warning / Troubleshooting (Example 6)
+  if (/\b(not connected|disconnected|unavailable|warning|update required|permission denied|offline|bluetooth|wi-fi)\b/i.test(ocrLower)) {
+    add('Help me fix this issue');
+    add('Why is this happening?');
+    add('Show troubleshooting steps');
+  }
+
+  // 4. Shopping / Retail / Fashion / Footwear (Examples 3, 11, 17)
+  if (/\b(shoe|sneaker|boot|sandal|shirt|sweatshirt|hoodie|jacket|coat|dress|suit|jean|sunglass|watch|bag|backpack)\b/i.test(`${ocrLower} ${allVisualText}`)) {
+    const itemWord = topVisual && topVisual.length <= 18 ? topVisual : 'item';
+    add(`Where can I buy this ${itemWord}?`);
+    add('Compare with similar products');
+    add('Build an outfit around this');
+  } else if (/[$€£¥₹]\s*\d+|\b(add to cart|buy now|in stock|free shipping|customer reviews|best seller|discount)\b/i.test(ocrLower)) {
+    add('Is this a good price?');
+    add('Compare with similar products');
+    add('Summarize the product reviews');
+  }
+
+  // 5. Food / Recipes / Restaurants (Examples 8, 15)
+  if (/\b(pizza|burger|sushi|ramen|pasta|salad|soup|stew|steak|cake|cookie|bread|coffee|espresso|ice cream|burrito|taco|curry|dish|recipe|ingredients|menu|restaurant|cafe|bistro|tablespoon|teaspoon|calories)\b/i.test(`${ocrLower} ${allVisualText}`)) {
+    if (/\b(restaurant|menu|reviews|rating|reservations|bistro|cafe)\b/i.test(ocrLower)) {
+      add('What are their signature dishes?');
+      add('Summarize restaurant reviews');
+      add('Plan a night out around this spot');
+    } else {
+      add('How do I make this dish?');
+      add('Brainstorm similar recipes');
+      add('Estimate calories and nutrition');
+    }
+  }
+
+  // 6. Plants & Animals (Example 14)
+  if (/\b(plant|flower|daisy|rose|orchid|fern|succulent|cactus|tree|mushroom|leaf|botanical|garden)\b/i.test(`${ocrLower} ${allVisualText}`)) {
+    add('Identify this plant');
+    add('How do I care for this?');
+    add('Is this plant pet-safe?');
+  }
+  if (/\b(dog|cat|puppy|kitten|retriever|terrier|poodle|shepherd|husky|pug|tabby|siamese|bird|parrot|eagle|owl|fish|turtle|rabbit|hamster|wildlife)\b/i.test(`${ocrLower} ${allVisualText}`)) {
+    const animalName = topVisual && topVisual.length <= 18 ? topVisual : 'animal';
+    add(`Tell me about this ${animalName}`);
+    add('What are its key traits?');
+    add('Create an illustration of this');
+  }
+
+  // 7. Data / Charts / Tables / Finance (Example 4)
+  if (/\b(\d+(\.\d+)?%|q[1-4]\b|revenue|profit|traffic|analytics|chart|graph|histogram|plot|dataset|median|average|yoy|roi|stocks?)\b/i.test(ocrLower)) {
+    add('Explain the trends shown here');
+    add('Turn these stats into a table');
+    add('Create a summary of this data');
+  }
+
+  // 8. Email / Chat / Social Post / Message Thread (Examples 1, 7)
+  if (/\b(dear |hi |hey |hello |sincerely|regards|subject:|inbox|reply|re:|fwd:|thread|posted by|@[\w_]+|retweet|likes)\b/i.test(ocrLower)) {
+    add('Summarize key points here');
+    add('Help me draft a reply');
+    add('Extract action items from this');
+  }
+
+  // 9. Travel / Places / Flights (Examples 5, 7, 16)
+  if (/\b(flight|airport|airline|terminal|hotel|resort|beach|plaza|castle|palace|mountain|trail|hike|itinerary|vacation|museum|stadium)\b/i.test(`${ocrLower} ${allVisualText}`)) {
+    add('Give travel tips for this spot');
+    add('Suggest a trip itinerary');
+    add('What are good places nearby?');
+  }
+
+  // 10. Music / Media / Videos / Articles (Examples 2, 9)
+  if (/\b(song|playlist|album|track|artist|spotify|concert|festival|movie|film|episode|trailer|subscribe|views)\b/i.test(ocrLower)) {
+    add('Tell me more about this');
+    add('Recommend similar titles');
+    add('Summarize the main highlights');
+  }
+
+  // 11. Text / Article / Short Phrase Fallbacks
+  if (pool.length < 3) {
+    if (ocr.length > 100) {
+      add('Summarize this article');
+      add('Explain the key concepts here');
+      add('Extract key takeaways');
+    } else if (ocr.length > 0) {
+      const cleanWords = ocr.replace(/[^\w\s'-]/g, ' ').trim().split(/\s+/).filter(Boolean);
+      const preview = cleanWords.slice(0, 4).join(' ') + (cleanWords.length > 4 ? '…' : '');
+      if (preview.length >= 2) {
+        add(`Explain "${preview}" in simple terms`);
+      }
+      if (hasTextAoi) {
+        add('Rewrite or polish this selected text');
+        add('Translate or summarize key points');
+      } else {
+        add('Explain this selection in detail');
+        add('Answer questions about this');
+      }
+    }
+  }
+
+  if (topVisual && pool.length < 3) {
+    add(`Identify this ${topVisual}`);
+    add(`Tell me more about ${topVisual}`);
+    add(`Find similar ${topVisual}s`);
+  }
+
+  const defaults = [
+    'Explain this selection in detail',
+    'Identify objects and key details here',
+    'Suggest next steps based on this'
+  ];
+  for (const d of defaults) {
+    if (pool.length >= 3) break;
+    add(d);
+  }
+  return pool.slice(0, 3);
+}
+
 function getContextualSuggestions() {
   const count = state.selectedAOIs.length;
   const hasFiles = state.selectedAOIs.some((a) => a.type === 'file');
@@ -2820,6 +3013,9 @@ function getContextualSuggestions() {
     .map((a) => (a.ocrText && a.ocrText.trim()) || '')
     .filter(Boolean)
     .join(' ');
+  const existingLabels = state.selectedAOIs
+    .map((a) => a.label || a.title || '')
+    .filter((l) => l && !/^(window|interactable|manual|text|screen)$/i.test(l));
 
   // PromptBoxStateFragmentPeer.java:762 & MainScreenKt$MainScreen$6$1.java:51:
   // If selectedAOIs is empty, clearSuggestions() -> 0 suggestion chips!
@@ -2831,10 +3027,10 @@ function getContextualSuggestions() {
   const magicCueChips = getMagicCueSuggestionsForOcrText(combinedOcrText);
 
   // 2. Gemini Chips (PromptBoxStateFragmentPeer.syncSuggestions lines 523-526):
-  //    - If the optional On-Device Suggestion LLM (~92 MB) is downloaded & enabled, request custom chips from `llm_worker.js`
-  //      (and use cached LLM chips as soon as they arrive).
-  //    - If not downloaded (or before LLM finishes), use the default hardcoded suggestions!
-  const aoiIdsKey = state.selectedAOIs.map((a) => a.id).join('|');
+  //    - If the optional On-Device Vision + Suggestion AI is downloaded & enabled, send BOTH the cropped image (`dataUrl`)
+  //      and `ocrText` to `llm_worker.js` (which runs ResNet-50 image classification + LaMini-Flan-T5-77M).
+  //    - Before the worker finishes (or when not downloaded), use `buildInstantContextualGeminiPrompts`!
+  const aoiIdsKey = state.selectedAOIs.map((a) => `${a.id}:${(a.ocrText || '').length}`).join('|');
   state.currentLlmCacheKey = aoiIdsKey;
   let geminiPrompts = [];
 
@@ -2844,12 +3040,14 @@ function getContextualSuggestions() {
     } else {
       const worker = getOrCreateLlmWorker();
       if (worker) {
-        const labels = state.selectedAOIs.map((a) => a.label || a.fileName || a.category || '').filter(Boolean).join(', ');
-        const contextSummary = [combinedOcrText, labels].filter(Boolean).join(' — ');
+        const firstImageAoi = state.selectedAOIs.find((a) => a.dataUrl && a.type !== 'text');
         worker.postMessage({
           type: 'generate_suggestions',
           reqId: aoiIdsKey,
-          contextSummary,
+          ocrText: combinedOcrText,
+          imageDataUrl: firstImageAoi ? firstImageAoi.dataUrl : null,
+          aoiCount: count,
+          hasFiles,
           modelDirUrl: state.llmModelDirUrl
         });
       }
@@ -2857,41 +3055,7 @@ function getContextualSuggestions() {
   }
 
   if (geminiPrompts.length === 0) {
-    if (count === 1) {
-      if (hasFiles) {
-        geminiPrompts = [
-          'Summarize key takeaways from this file',
-          'Extract action items and important details',
-          'Rewrite or format this into a clean table'
-        ];
-      } else if (hasTextAoi && combinedOcrText) {
-        const words = combinedOcrText.trim().split(/\s+/);
-        const preview = words.slice(0, 4).join(' ') + (words.length > 4 ? '…' : '');
-        geminiPrompts = [
-          `Explain "${preview}" in simple terms`,
-          'Rewrite or polish this selected text',
-          'Translate or summarize key points from this text'
-        ];
-      } else if (combinedOcrText) {
-        geminiPrompts = [
-          'Explain this selection in detail',
-          'Extract text and summarize key points',
-          'Answer questions or find info about this'
-        ];
-      } else {
-        geminiPrompts = [
-          'Explain this selection in detail',
-          'Identify objects and key details shown here',
-          'Suggest next steps based on this'
-        ];
-      }
-    } else {
-      geminiPrompts = [
-        `Compare and synthesize these ${count} selections`,
-        'Summarize common themes across these items',
-        'Create an action plan combining these'
-      ];
-    }
+    geminiPrompts = buildInstantContextualGeminiPrompts(combinedOcrText, existingLabels, count, hasFiles, hasTextAoi);
   }
 
   const remainingCapacity = Math.max(0, 3 - magicCueChips.length);
@@ -3280,6 +3444,7 @@ window.addEventListener('mouseup', async (e) => {
               id: `aoi_${Date.now()}_${Math.random()}`,
               type: 'screen',
               category: state.hoveredAoi.category || 'INTERACTABLE',
+              label: state.hoveredAoi.label || state.hoveredAoi.title || '',
               ocrText: containedText,
               rect: hRect,
               filePath: crop.filePath,

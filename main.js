@@ -25,22 +25,23 @@ let latestScreenshotInfo = null;
 let latestOcrInfo = null;
 
 const llmModelsBaseDir = path.join(app.getPath('userData'), 'odml_models');
-const llmModelDir = path.join(llmModelsBaseDir, 'LaMini-Flan-T5-77M');
-const LLM_HF_REPO = 'Xenova/LaMini-Flan-T5-77M';
-const LLM_REQUIRED_FILES = [
-  'config.json',
-  'generation_config.json',
-  'tokenizer.json',
-  'tokenizer_config.json',
-  'special_tokens_map.json',
-  'onnx/encoder_model_quantized.onnx',
-  'onnx/decoder_model_merged_quantized.onnx'
+const LLM_DOWNLOAD_SPECS = [
+  { repo: 'Xenova/LaMini-Flan-T5-77M', dir: 'LaMini-Flan-T5-77M', rel: 'config.json', size: 2048 },
+  { repo: 'Xenova/LaMini-Flan-T5-77M', dir: 'LaMini-Flan-T5-77M', rel: 'generation_config.json', size: 512 },
+  { repo: 'Xenova/LaMini-Flan-T5-77M', dir: 'LaMini-Flan-T5-77M', rel: 'tokenizer.json', size: 2421760 },
+  { repo: 'Xenova/LaMini-Flan-T5-77M', dir: 'LaMini-Flan-T5-77M', rel: 'tokenizer_config.json', size: 2048 },
+  { repo: 'Xenova/LaMini-Flan-T5-77M', dir: 'LaMini-Flan-T5-77M', rel: 'special_tokens_map.json', size: 2048 },
+  { repo: 'Xenova/LaMini-Flan-T5-77M', dir: 'LaMini-Flan-T5-77M', rel: 'onnx/encoder_model_quantized.onnx', size: 35759104 },
+  { repo: 'Xenova/LaMini-Flan-T5-77M', dir: 'LaMini-Flan-T5-77M', rel: 'onnx/decoder_model_merged_quantized.onnx', size: 59339776 },
+  { repo: 'Xenova/resnet-50', dir: 'resnet-50', rel: 'config.json', size: 69632 },
+  { repo: 'Xenova/resnet-50', dir: 'resnet-50', rel: 'preprocessor_config.json', size: 512 },
+  { repo: 'Xenova/resnet-50', dir: 'resnet-50', rel: 'onnx/model_quantized.onnx', size: 25787392 }
 ];
 
 function checkLlmModelDownloaded() {
   try {
-    return LLM_REQUIRED_FILES.every((rel) => {
-      const full = path.join(llmModelDir, ...rel.split('/'));
+    return LLM_DOWNLOAD_SPECS.every((item) => {
+      const full = path.join(llmModelsBaseDir, item.dir, ...item.rel.split('/'));
       return fs.existsSync(full) && fs.statSync(full).size > 10;
     });
   } catch (_) {
@@ -726,38 +727,33 @@ ipcMain.handle('magic-pointer:download-llm-model', async () => {
     }
   };
   try {
-    const fileSizesApprox = {
-      'config.json': 2048,
-      'generation_config.json': 512,
-      'tokenizer.json': 2421760,
-      'tokenizer_config.json': 2048,
-      'special_tokens_map.json': 2048,
-      'onnx/encoder_model_quantized.onnx': 35759104,
-      'onnx/decoder_model_merged_quantized.onnx': 59339776
-    };
-    const totalExpectedBytes = Object.values(fileSizesApprox).reduce((a, b) => a + b, 0);
+    const totalExpectedBytes = LLM_DOWNLOAD_SPECS.reduce((acc, s) => acc + s.size, 0);
     let completedFilesBytes = 0;
 
-    for (let i = 0; i < LLM_REQUIRED_FILES.length; i++) {
-      const rel = LLM_REQUIRED_FILES[i];
-      const destPath = path.join(llmModelDir, ...rel.split('/'));
-      const url = `https://huggingface.co/${LLM_HF_REPO}/resolve/main/${rel}`;
-      const fileLabel = path.basename(rel);
+    for (let i = 0; i < LLM_DOWNLOAD_SPECS.length; i++) {
+      const spec = LLM_DOWNLOAD_SPECS[i];
+      const destPath = path.join(llmModelsBaseDir, spec.dir, ...spec.rel.split('/'));
+      if (fs.existsSync(destPath) && fs.statSync(destPath).size > 10) {
+        completedFilesBytes += fs.statSync(destPath).size;
+        continue;
+      }
+      const url = `https://huggingface.co/${spec.repo}/resolve/main/${spec.rel}`;
+      const fileLabel = `${spec.dir}/${path.basename(spec.rel)}`;
 
       sendProgress(
         Math.min(99, Math.round((completedFilesBytes / totalExpectedBytes) * 100)),
-        `Downloading ${fileLabel} (${i + 1}/${LLM_REQUIRED_FILES.length})...`
+        `Downloading ${fileLabel} (${i + 1}/${LLM_DOWNLOAD_SPECS.length})...`
       );
 
-      await downloadFileWithRedirects(url, destPath, (_chunkLen, fileReceived, fileTotal) => {
+      await downloadFileWithRedirects(url, destPath, (_chunkLen, fileReceived) => {
         const curTotal = completedFilesBytes + fileReceived;
         const pct = Math.min(99, Math.max(1, Math.round((curTotal / totalExpectedBytes) * 100)));
         const mbDone = (curTotal / (1024 * 1024)).toFixed(1);
         const mbTotal = (totalExpectedBytes / (1024 * 1024)).toFixed(1);
-        sendProgress(pct, `Downloading On-Device Suggestion LLM (${mbDone} / ${mbTotal} MB)...`);
+        sendProgress(pct, `Downloading Vision + Suggestion AI (${mbDone} / ${mbTotal} MB)...`);
       });
 
-      const actualSize = fs.existsSync(destPath) ? fs.statSync(destPath).size : (fileSizesApprox[rel] || 0);
+      const actualSize = fs.existsSync(destPath) ? fs.statSync(destPath).size : spec.size;
       completedFilesBytes += actualSize;
     }
 
@@ -765,7 +761,7 @@ ipcMain.handle('magic-pointer:download-llm-model', async () => {
     llmModelDownloaded = checkLlmModelDownloaded();
     llmSuggestionsEnabled = llmModelDownloaded;
     savePersistedSettings();
-    sendProgress(100, 'On-Device Suggestion LLM installed and enabled!');
+    sendProgress(100, 'On-Device Vision + Suggestion AI installed and enabled!');
     if (updateTrayMenuFn) updateTrayMenuFn();
     if (overlayWindow && !overlayWindow.isDestroyed()) {
       overlayWindow.webContents.send('magic-pointer:llm-state', {
