@@ -2,6 +2,7 @@ const { app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain, dialog, screen,
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const https = require('https');
 const { spawn } = require('child_process');
 
 let overlayWindow = null;
@@ -10,34 +11,124 @@ let nativeWatcher = null;
 let isMagicPointerActive = false;
 let sensitivityLevel = 2;
 let isDarkMode = true;
-let magicCueEnabled = false;
-let magicCuePackDownloaded = false;
+// MagicCue is bundled with the app (1.2 MB entity classifier pack) and enabled by default!
+let magicCueEnabled = true;
+// Optional Lightweight Suggestion LLM (Xenova/LaMini-Flan-T5-77M quantized ONNX, ~92 MB):
+// Off by default until the user downloads & enables it; falls back to instant default suggestions when not downloaded!
+let llmSuggestionsEnabled = false;
+let llmModelDownloaded = false;
+let isLlmDownloading = false;
 let updateTrayMenuFn = null;
 const pendingCropCallbacks = new Map();
 let cachedDetectedWindows = [];
 let latestScreenshotInfo = null;
 let latestOcrInfo = null;
 
-const magicCuePackPath = path.join(__dirname, 'extracted_assets', 'models', 'magic_cue_entity_pack_v1.json');
+const llmModelsBaseDir = path.join(app.getPath('userData'), 'odml_models');
+const llmModelDir = path.join(llmModelsBaseDir, 'LaMini-Flan-T5-77M');
+const LLM_HF_REPO = 'Xenova/LaMini-Flan-T5-77M';
+const LLM_REQUIRED_FILES = [
+  'config.json',
+  'generation_config.json',
+  'tokenizer.json',
+  'tokenizer_config.json',
+  'special_tokens_map.json',
+  'onnx/encoder_model_quantized.onnx',
+  'onnx/decoder_model_merged_quantized.onnx'
+];
 
-function loadPersistedMagicCueState() {
+function checkLlmModelDownloaded() {
   try {
-    magicCuePackDownloaded = fs.existsSync(magicCuePackPath);
+    return LLM_REQUIRED_FILES.every((rel) => {
+      const full = path.join(llmModelDir, ...rel.split('/'));
+      return fs.existsSync(full) && fs.statSync(full).size > 10;
+    });
+  } catch (_) {
+    return false;
+  }
+}
+
+function getLlmModelDirFileUrl() {
+  return `file:///${llmModelsBaseDir.replace(/\\/g, '/')}/`;
+}
+
+function loadPersistedSettings() {
+  try {
+    llmModelDownloaded = checkLlmModelDownloaded();
     const cfgPath = path.join(app.getPath('userData'), 'magic_pointer_settings.json');
     if (fs.existsSync(cfgPath)) {
       const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
       if (typeof cfg.magicCueEnabled === 'boolean') {
-        magicCueEnabled = cfg.magicCueEnabled && magicCuePackDownloaded;
+        magicCueEnabled = cfg.magicCueEnabled;
+      }
+      if (typeof cfg.llmSuggestionsEnabled === 'boolean') {
+        llmSuggestionsEnabled = cfg.llmSuggestionsEnabled && llmModelDownloaded;
       }
     }
   } catch (_) {}
 }
 
-function savePersistedMagicCueState() {
+function savePersistedSettings() {
   try {
     const cfgPath = path.join(app.getPath('userData'), 'magic_pointer_settings.json');
-    fs.writeFileSync(cfgPath, JSON.stringify({ magicCueEnabled, magicCuePackDownloaded }, null, 2), 'utf8');
+    fs.writeFileSync(
+      cfgPath,
+      JSON.stringify({ magicCueEnabled, llmSuggestionsEnabled, llmModelDownloaded }, null, 2),
+      'utf8'
+    );
   } catch (_) {}
+}
+
+function downloadFileWithRedirects(url, destPath, onBytes) {
+  return new Promise((resolve, reject) => {
+    const dir = path.dirname(destPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const tempPath = `${destPath}.part`;
+
+    const request = (currentUrl, redirectsLeft = 5) => {
+      https
+        .get(currentUrl, { headers: { 'User-Agent': 'MagicPointer/1.0' } }, (res) => {
+          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+            res.resume();
+            if (redirectsLeft <= 0) return reject(new Error('Too many redirects'));
+            const nextUrl = new URL(res.headers.location, currentUrl).href;
+            return request(nextUrl, redirectsLeft - 1);
+          }
+          if (res.statusCode !== 200) {
+            res.resume();
+            return reject(new Error(`HTTP ${res.statusCode} for ${currentUrl}`));
+          }
+          const totalBytes = parseInt(res.headers['content-length'] || '0', 10);
+          let receivedBytes = 0;
+          const fileStream = fs.createWriteStream(tempPath);
+          res.on('data', (chunk) => {
+            receivedBytes += chunk.length;
+            if (onBytes) onBytes(chunk.length, receivedBytes, totalBytes);
+          });
+          res.pipe(fileStream);
+          fileStream.on('finish', () => {
+            fileStream.close(() => {
+              try {
+                if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
+                fs.renameSync(tempPath, destPath);
+                resolve();
+              } catch (err) {
+                reject(err);
+              }
+            });
+          });
+          fileStream.on('error', (err) => {
+            try { fs.unlinkSync(tempPath); } catch (_) {}
+            reject(err);
+          });
+        })
+        .on('error', (err) => {
+          try { fs.unlinkSync(tempPath); } catch (_) {}
+          reject(err);
+        });
+    };
+    request(url);
+  });
 }
 
 // High-refresh-rate GPU & zero-throttling flags for 120fps+ smooth animations
@@ -171,7 +262,9 @@ function activateMagicPointer(rawX, rawY, source = 'shake') {
     isDarkMode,
     sensitivityLevel,
     magicCueEnabled,
-    magicCuePackDownloaded,
+    llmSuggestionsEnabled,
+    llmModelDownloaded,
+    llmModelDirUrl: getLlmModelDirFileUrl(),
     detectedWindows: cachedDetectedWindows
   });
 }
@@ -400,25 +493,42 @@ function createTray() {
         }
       },
       {
-        label: magicCuePackDownloaded
-          ? 'Magic Cue Smart Actions (Entity Classifier)'
-          : 'Magic Cue Smart Actions (Download Required — 1.2 MB)',
+        label: 'Magic Cue Smart Actions (Bundled)',
         type: 'checkbox',
         checked: magicCueEnabled,
         click: (item) => {
-          if (!magicCuePackDownloaded) {
-            item.checked = false;
-            const pt = screen.getCursorScreenPoint();
-            activateMagicPointer(pt.x, pt.y, 'magic-cue-setup');
-            updateMenu();
-            return;
-          }
           magicCueEnabled = item.checked;
-          savePersistedMagicCueState();
+          savePersistedSettings();
           if (overlayWindow && !overlayWindow.isDestroyed()) {
             overlayWindow.webContents.send('magic-pointer:magic-cue-state', {
               enabled: magicCueEnabled,
-              downloaded: magicCuePackDownloaded
+              downloaded: true
+            });
+          }
+          updateMenu();
+        }
+      },
+      {
+        label: llmModelDownloaded
+          ? 'Smart Suggestion LLM (On-Device 77M)'
+          : 'Smart Suggestion LLM (Download Required — 92 MB)',
+        type: 'checkbox',
+        checked: llmSuggestionsEnabled,
+        click: (item) => {
+          if (!llmModelDownloaded) {
+            item.checked = false;
+            const pt = screen.getCursorScreenPoint();
+            activateMagicPointer(pt.x, pt.y, 'llm-setup');
+            updateMenu();
+            return;
+          }
+          llmSuggestionsEnabled = item.checked;
+          savePersistedSettings();
+          if (overlayWindow && !overlayWindow.isDestroyed()) {
+            overlayWindow.webContents.send('magic-pointer:llm-state', {
+              enabled: llmSuggestionsEnabled,
+              downloaded: llmModelDownloaded,
+              modelDirUrl: getLlmModelDirFileUrl()
             });
           }
           updateMenu();
@@ -558,66 +668,121 @@ ipcMain.handle('magic-pointer:trigger-chrome-shortcut', async (_event, mode) => 
 });
 
 ipcMain.handle('magic-pointer:get-magic-cue-state', async () => {
-  return { enabled: magicCueEnabled, downloaded: magicCuePackDownloaded };
+  return { enabled: magicCueEnabled, downloaded: true };
 });
 
 ipcMain.handle('magic-pointer:set-magic-cue-enabled', async (_event, enabled) => {
-  if (enabled && !magicCuePackDownloaded) {
-    return { ok: false, needsDownload: true, enabled: false, downloaded: false };
-  }
   magicCueEnabled = !!enabled;
-  savePersistedMagicCueState();
+  savePersistedSettings();
   if (updateTrayMenuFn) updateTrayMenuFn();
   if (overlayWindow && !overlayWindow.isDestroyed()) {
     overlayWindow.webContents.send('magic-pointer:magic-cue-state', {
       enabled: magicCueEnabled,
-      downloaded: magicCuePackDownloaded
+      downloaded: true
     });
   }
-  return { ok: true, enabled: magicCueEnabled, downloaded: magicCuePackDownloaded };
+  return { ok: true, enabled: magicCueEnabled, downloaded: true };
 });
 
-ipcMain.handle('magic-pointer:download-magic-cue-pack', async () => {
+ipcMain.handle('magic-pointer:get-llm-state', async () => {
+  llmModelDownloaded = checkLlmModelDownloaded();
+  return {
+    enabled: llmSuggestionsEnabled && llmModelDownloaded,
+    downloaded: llmModelDownloaded,
+    downloading: isLlmDownloading,
+    modelDirUrl: getLlmModelDirFileUrl()
+  };
+});
+
+ipcMain.handle('magic-pointer:set-llm-enabled', async (_event, enabled) => {
+  llmModelDownloaded = checkLlmModelDownloaded();
+  if (enabled && !llmModelDownloaded) {
+    return { ok: false, needsDownload: true, enabled: false, downloaded: false };
+  }
+  llmSuggestionsEnabled = !!enabled;
+  savePersistedSettings();
+  if (updateTrayMenuFn) updateTrayMenuFn();
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.webContents.send('magic-pointer:llm-state', {
+      enabled: llmSuggestionsEnabled,
+      downloaded: llmModelDownloaded,
+      modelDirUrl: getLlmModelDirFileUrl()
+    });
+  }
+  return {
+    ok: true,
+    enabled: llmSuggestionsEnabled,
+    downloaded: llmModelDownloaded,
+    modelDirUrl: getLlmModelDirFileUrl()
+  };
+});
+
+ipcMain.handle('magic-pointer:download-llm-model', async () => {
+  if (isLlmDownloading) return { ok: false, error: 'Already downloading' };
+  isLlmDownloading = true;
+  const sendProgress = (pct, status) => {
+    if (overlayWindow && !overlayWindow.isDestroyed()) {
+      overlayWindow.webContents.send('magic-pointer:llm-download-progress', { pct, status });
+    }
+  };
   try {
-    const modelsDir = path.join(__dirname, 'extracted_assets', 'models');
-    if (!fs.existsSync(modelsDir)) fs.mkdirSync(modelsDir, { recursive: true });
-    const sendProgress = (pct, status) => {
-      if (overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.webContents.send('magic-pointer:magic-cue-download-progress', { pct, status });
-      }
+    const fileSizesApprox = {
+      'config.json': 2048,
+      'generation_config.json': 512,
+      'tokenizer.json': 2421760,
+      'tokenizer_config.json': 2048,
+      'special_tokens_map.json': 2048,
+      'onnx/encoder_model_quantized.onnx': 35759104,
+      'onnx/decoder_model_merged_quantized.onnx': 59339776
     };
-    sendProgress(12, 'Connecting to Magic Cue TextClassifier model repository...');
-    await new Promise((r) => setTimeout(r, 240));
-    sendProgress(38, 'Downloading libtextclassifier entity rules & gazetteers (0.5 / 1.2 MB)...');
-    await new Promise((r) => setTimeout(r, 320));
-    sendProgress(74, 'Downloading action intent templates & locale patterns (0.9 / 1.2 MB)...');
-    await new Promise((r) => setTimeout(r, 280));
-    sendProgress(94, 'Verifying and installing Magic Cue Entity Classifier pack...');
+    const totalExpectedBytes = Object.values(fileSizesApprox).reduce((a, b) => a + b, 0);
+    let completedFilesBytes = 0;
 
-    const packData = {
-      version: '1.0.260916',
-      installedAt: new Date().toISOString(),
-      classifier: 'com.google.android.desktop.gpointer.app.magiccue.MagicCueTextClassifier',
-      supportedEntities: ['email', 'url', 'address', 'datetime', 'flight', 'phone'],
-      excludedPackages: ['com.google.android.googlequicksearchbox']
-    };
-    fs.writeFileSync(magicCuePackPath, JSON.stringify(packData, null, 2), 'utf8');
-    await new Promise((r) => setTimeout(r, 180));
+    for (let i = 0; i < LLM_REQUIRED_FILES.length; i++) {
+      const rel = LLM_REQUIRED_FILES[i];
+      const destPath = path.join(llmModelDir, ...rel.split('/'));
+      const url = `https://huggingface.co/${LLM_HF_REPO}/resolve/main/${rel}`;
+      const fileLabel = path.basename(rel);
 
-    magicCuePackDownloaded = true;
-    magicCueEnabled = true;
-    savePersistedMagicCueState();
-    sendProgress(100, 'Magic Cue Smart Actions installed and enabled');
+      sendProgress(
+        Math.min(99, Math.round((completedFilesBytes / totalExpectedBytes) * 100)),
+        `Downloading ${fileLabel} (${i + 1}/${LLM_REQUIRED_FILES.length})...`
+      );
+
+      await downloadFileWithRedirects(url, destPath, (_chunkLen, fileReceived, fileTotal) => {
+        const curTotal = completedFilesBytes + fileReceived;
+        const pct = Math.min(99, Math.max(1, Math.round((curTotal / totalExpectedBytes) * 100)));
+        const mbDone = (curTotal / (1024 * 1024)).toFixed(1);
+        const mbTotal = (totalExpectedBytes / (1024 * 1024)).toFixed(1);
+        sendProgress(pct, `Downloading On-Device Suggestion LLM (${mbDone} / ${mbTotal} MB)...`);
+      });
+
+      const actualSize = fs.existsSync(destPath) ? fs.statSync(destPath).size : (fileSizesApprox[rel] || 0);
+      completedFilesBytes += actualSize;
+    }
+
+    isLlmDownloading = false;
+    llmModelDownloaded = checkLlmModelDownloaded();
+    llmSuggestionsEnabled = llmModelDownloaded;
+    savePersistedSettings();
+    sendProgress(100, 'On-Device Suggestion LLM installed and enabled!');
     if (updateTrayMenuFn) updateTrayMenuFn();
     if (overlayWindow && !overlayWindow.isDestroyed()) {
-      overlayWindow.webContents.send('magic-pointer:magic-cue-state', {
-        enabled: magicCueEnabled,
-        downloaded: magicCuePackDownloaded
+      overlayWindow.webContents.send('magic-pointer:llm-state', {
+        enabled: llmSuggestionsEnabled,
+        downloaded: llmModelDownloaded,
+        modelDirUrl: getLlmModelDirFileUrl()
       });
     }
-    return { ok: true, enabled: true, downloaded: true };
+    return {
+      ok: true,
+      enabled: llmSuggestionsEnabled,
+      downloaded: llmModelDownloaded,
+      modelDirUrl: getLlmModelDirFileUrl()
+    };
   } catch (err) {
-    return { ok: false, error: String(err) };
+    isLlmDownloading = false;
+    return { ok: false, error: String(err && err.message ? err.message : err) };
   }
 });
 
@@ -634,7 +799,7 @@ ipcMain.handle('magic-pointer:execute-magic-cue', async (_event, actionPayload) 
 });
 
 app.whenReady().then(() => {
-  loadPersistedMagicCueState();
+  loadPersistedSettings();
   createOverlayWindow();
   createTray();
   startNativeWatcher();

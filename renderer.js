@@ -119,11 +119,17 @@ const state = {
   fteStep: 'wiggle-adjust',
   lottieInstance: null,
   lottiePaused: false,
-  // Optional Magic Cue Smart Actions (MagicCueImpl.java & PromptBoxStateFragmentPeer.java:96-97):
-  // MAX_MAGIC_CUE_SUGGESTIONS = 2, MAX_TOTAL_SUGGESTIONS = 3
-  magicCueEnabled: false,
-  magicCuePackDownloaded: false,
-  magicCueDownloading: false
+  // MagicCue Smart Actions (MagicCueImpl.java & PromptBoxStateFragmentPeer.java:96-97):
+  // Bundled with the app (1.2 MB entity classifier pack) and enabled by default!
+  magicCueEnabled: true,
+  magicCuePackDownloaded: true,
+  // Optional On-Device Suggestion LLM (LlmProcessorServiceImpl.java / LaMini-Flan-T5-77M int8 ONNX, ~92 MB):
+  // Off by default until downloaded; uses default suggestions when not downloaded!
+  llmSuggestionsEnabled: false,
+  llmModelDownloaded: false,
+  llmDownloading: false,
+  llmModelDirUrl: null,
+  llmChipsCache: new Map()
 };
 
 // DOM Elements
@@ -2695,14 +2701,38 @@ function renderSelectedAOIsAndChips(opts = {}) {
 }
 
 // ============================================================================
-// 5d. MagicCueImpl Entity Classifier & PromptBoxStateFragmentPeer.syncSuggestions
-//     Exact port of MagicCueImpl.java, MagicCueImpl$getSuggestion$2$1.java,
+// 5d. MagicCueImpl Entity Classifier (Bundled) + Optional On-Device Suggestion LLM
+//     Exact port of MagicCueImpl.java, LlmProcessorServiceImpl.java,
 //     Suggestion.java (Suggestion.MagicCue vs Suggestion.Gemini), and
 //     PromptBoxStateFragmentPeer.java (lines 96-97, 519-537, 590-641):
-//     - MAX_MAGIC_CUE_SUGGESTIONS = 2
-//     - MAX_TOTAL_SUGGESTIONS = 3
-//     - Optional feature: only runs when `state.magicCueEnabled && state.magicCuePackDownloaded`!
+//     - MagicCue (1.2 MB entity classifier) is bundled with the app and active by default!
+//     - Optional Lightweight Suggestion LLM (~92 MB LaMini-Flan-T5-77M int8 ONNX):
+//       when downloaded & enabled, generates AI suggestion chips in `llm_worker.js`;
+//       when not downloaded (or while inferring), displays the default hardcoded suggestions!
 // ============================================================================
+let llmWorker = null;
+let llmReqCounter = 0;
+
+function getOrCreateLlmWorker() {
+  if (llmWorker) return llmWorker;
+  try {
+    llmWorker = new Worker('llm_worker.js', { type: 'module' });
+    llmWorker.onmessage = (e) => {
+      const msg = e.data;
+      if (!msg) return;
+      if (msg.type === 'suggestions_ready' && Array.isArray(msg.chips) && msg.chips.length > 0) {
+        state.llmChipsCache.set(msg.reqId, msg.chips);
+        if (state.expanded && !state.isCollapsed && state.currentLlmCacheKey === msg.reqId) {
+          renderSuggestionChips();
+        }
+      }
+    };
+  } catch (err) {
+    console.warn('LLM Worker creation warning:', err);
+  }
+  return llmWorker;
+}
+
 const MAGIC_CUE_ICONS = {
   email: `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>`,
   link: `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>`,
@@ -2713,8 +2743,8 @@ const MAGIC_CUE_ICONS = {
 };
 
 function getMagicCueSuggestionsForOcrText(rawText) {
-  // PromptBoxStateFragmentPeer.java:830: if (!this.$magicCueEnabled) return emptyList()
-  if (!state.magicCueEnabled || !state.magicCuePackDownloaded) return [];
+  // Bundled MagicCue entity classifier (enabled by default; can be toggled in Tray)
+  if (!state.magicCueEnabled) return [];
   const text = (rawText || '').trim();
   if (!text) return [];
 
@@ -2797,46 +2827,71 @@ function getContextualSuggestions() {
     return [];
   }
 
-  // 1. MagicCue Chips (up to MAX_MAGIC_CUE_SUGGESTIONS = 2)
+  // 1. MagicCue Chips (up to MAX_MAGIC_CUE_SUGGESTIONS = 2, bundled with the app!)
   const magicCueChips = getMagicCueSuggestionsForOcrText(combinedOcrText);
 
   // 2. Gemini Chips (PromptBoxStateFragmentPeer.syncSuggestions lines 523-526):
-  //    remainingCapacity = 3 - newMagicCuePart.size()
+  //    - If the optional On-Device Suggestion LLM (~92 MB) is downloaded & enabled, request custom chips from `llm_worker.js`
+  //      (and use cached LLM chips as soon as they arrive).
+  //    - If not downloaded (or before LLM finishes), use the default hardcoded suggestions!
+  const aoiIdsKey = state.selectedAOIs.map((a) => a.id).join('|');
+  state.currentLlmCacheKey = aoiIdsKey;
   let geminiPrompts = [];
-  if (count === 1) {
-    if (hasFiles) {
-      geminiPrompts = [
-        'Summarize key takeaways from this file',
-        'Extract action items and important details',
-        'Rewrite or format this into a clean table'
-      ];
-    } else if (hasTextAoi && combinedOcrText) {
-      const words = combinedOcrText.trim().split(/\s+/);
-      const preview = words.slice(0, 4).join(' ') + (words.length > 4 ? '…' : '');
-      geminiPrompts = [
-        `Explain "${preview}" in simple terms`,
-        'Rewrite or polish this selected text',
-        'Translate or summarize key points from this text'
-      ];
-    } else if (combinedOcrText) {
-      geminiPrompts = [
-        'Explain this selection in detail',
-        'Extract text and summarize key points',
-        'Answer questions or find info about this'
-      ];
+
+  if (state.llmSuggestionsEnabled && state.llmModelDownloaded) {
+    if (state.llmChipsCache.has(aoiIdsKey)) {
+      geminiPrompts = state.llmChipsCache.get(aoiIdsKey);
+    } else {
+      const worker = getOrCreateLlmWorker();
+      if (worker) {
+        const labels = state.selectedAOIs.map((a) => a.label || a.fileName || a.category || '').filter(Boolean).join(', ');
+        const contextSummary = [combinedOcrText, labels].filter(Boolean).join(' — ');
+        worker.postMessage({
+          type: 'generate_suggestions',
+          reqId: aoiIdsKey,
+          contextSummary,
+          modelDirUrl: state.llmModelDirUrl
+        });
+      }
+    }
+  }
+
+  if (geminiPrompts.length === 0) {
+    if (count === 1) {
+      if (hasFiles) {
+        geminiPrompts = [
+          'Summarize key takeaways from this file',
+          'Extract action items and important details',
+          'Rewrite or format this into a clean table'
+        ];
+      } else if (hasTextAoi && combinedOcrText) {
+        const words = combinedOcrText.trim().split(/\s+/);
+        const preview = words.slice(0, 4).join(' ') + (words.length > 4 ? '…' : '');
+        geminiPrompts = [
+          `Explain "${preview}" in simple terms`,
+          'Rewrite or polish this selected text',
+          'Translate or summarize key points from this text'
+        ];
+      } else if (combinedOcrText) {
+        geminiPrompts = [
+          'Explain this selection in detail',
+          'Extract text and summarize key points',
+          'Answer questions or find info about this'
+        ];
+      } else {
+        geminiPrompts = [
+          'Explain this selection in detail',
+          'Identify objects and key details shown here',
+          'Suggest next steps based on this'
+        ];
+      }
     } else {
       geminiPrompts = [
-        'Explain this selection in detail',
-        'Identify objects and key details shown here',
-        'Suggest next steps based on this'
+        `Compare and synthesize these ${count} selections`,
+        'Summarize common themes across these items',
+        'Create an action plan combining these'
       ];
     }
-  } else {
-    geminiPrompts = [
-      `Compare and synthesize these ${count} selections`,
-      'Summarize common themes across these items',
-      'Create an action plan combining these'
-    ];
   }
 
   const remainingCapacity = Math.max(0, 3 - magicCueChips.length);
@@ -3790,28 +3845,28 @@ btnSliderMinus.addEventListener('click', () => applySensitivity(state.sensitivit
 btnSliderPlus.addEventListener('click', () => applySensitivity(state.sensitivityLevel + 1, true));
 applySensitivity(state.sensitivityLevel, false);
 
-// Optional Magic Cue Smart Actions UI & On-Demand Download
+// Optional On-Device Suggestion LLM (~92 MB LaMini-Flan-T5-77M int8 ONNX) UI & On-Demand Download
 const btnMagicCueAction = document.getElementById('btn-magic-cue-action');
 const magicCueBadge = document.getElementById('magic-cue-badge');
 const magicCueProgressWrap = document.getElementById('magic-cue-progress-wrap');
 const magicCueProgressFill = document.getElementById('magic-cue-progress-fill');
 const magicCueProgressText = document.getElementById('magic-cue-progress-text');
 
-function syncMagicCueSettingsUI() {
+function syncLlmSettingsUI() {
   if (!btnMagicCueAction || !magicCueBadge) return;
-  if (state.magicCueDownloading) {
+  if (state.llmDownloading) {
     btnMagicCueAction.disabled = true;
     btnMagicCueAction.textContent = 'Downloading...';
     btnMagicCueAction.classList.remove('active');
     return;
   }
   btnMagicCueAction.disabled = false;
-  if (!state.magicCuePackDownloaded) {
-    magicCueBadge.textContent = 'Optional · 1.2 MB';
+  if (!state.llmModelDownloaded) {
+    magicCueBadge.textContent = 'Optional · 92 MB';
     magicCueBadge.classList.remove('installed');
     btnMagicCueAction.textContent = 'Download & Enable';
     btnMagicCueAction.classList.remove('active');
-  } else if (state.magicCueEnabled) {
+  } else if (state.llmSuggestionsEnabled) {
     magicCueBadge.textContent = 'Installed · Active';
     magicCueBadge.classList.add('installed');
     btnMagicCueAction.textContent = 'Enabled';
@@ -3826,41 +3881,39 @@ function syncMagicCueSettingsUI() {
 
 if (btnMagicCueAction) {
   btnMagicCueAction.addEventListener('click', async () => {
-    if (state.magicCueDownloading) return;
-    if (!state.magicCuePackDownloaded) {
-      state.magicCueDownloading = true;
+    if (state.llmDownloading) return;
+    if (!state.llmModelDownloaded) {
+      state.llmDownloading = true;
       if (magicCueProgressWrap) magicCueProgressWrap.classList.remove('hidden');
-      if (magicCueProgressFill) magicCueProgressFill.style.width = '5%';
-      if (magicCueProgressText) magicCueProgressText.textContent = 'Starting download...';
-      syncMagicCueSettingsUI();
+      if (magicCueProgressFill) magicCueProgressFill.style.width = '2%';
+      if (magicCueProgressText) magicCueProgressText.textContent = 'Connecting to Hugging Face model repository...';
+      syncLlmSettingsUI();
 
-      if (api.downloadMagicCuePack) {
-        const res = await api.downloadMagicCuePack();
-        state.magicCueDownloading = false;
+      if (api.downloadLlmModel) {
+        const res = await api.downloadLlmModel();
+        state.llmDownloading = false;
         if (res && res.ok) {
-          state.magicCuePackDownloaded = true;
-          state.magicCueEnabled = true;
+          state.llmModelDownloaded = true;
+          state.llmSuggestionsEnabled = true;
+          if (res.modelDirUrl) state.llmModelDirUrl = res.modelDirUrl;
+          const worker = getOrCreateLlmWorker();
+          if (worker) worker.postMessage({ type: 'init', modelDirUrl: state.llmModelDirUrl });
           setTimeout(() => {
             if (magicCueProgressWrap) magicCueProgressWrap.classList.add('hidden');
           }, 900);
         } else if (magicCueProgressText) {
-          magicCueProgressText.textContent = 'Download failed. Try again.';
+          magicCueProgressText.textContent = `Download failed: ${(res && res.error) || 'Check internet connection'}`;
         }
-      } else {
-        state.magicCueDownloading = false;
-        state.magicCuePackDownloaded = true;
-        state.magicCueEnabled = true;
-        if (magicCueProgressWrap) magicCueProgressWrap.classList.add('hidden');
       }
-      syncMagicCueSettingsUI();
+      syncLlmSettingsUI();
       if (state.expanded) renderSuggestionChips();
     } else {
-      const nextEnabled = !state.magicCueEnabled;
-      state.magicCueEnabled = nextEnabled;
-      if (api.setMagicCueEnabled) {
-        await api.setMagicCueEnabled(nextEnabled);
+      const nextEnabled = !state.llmSuggestionsEnabled;
+      state.llmSuggestionsEnabled = nextEnabled;
+      if (api.setLlmEnabled) {
+        await api.setLlmEnabled(nextEnabled);
       }
-      syncMagicCueSettingsUI();
+      syncLlmSettingsUI();
       if (state.expanded) renderSuggestionChips();
     }
   });
@@ -3870,8 +3923,22 @@ if (api.getMagicCueState) {
   api.getMagicCueState().then((st) => {
     if (st) {
       state.magicCueEnabled = !!st.enabled;
-      state.magicCuePackDownloaded = !!st.downloaded;
-      syncMagicCueSettingsUI();
+    }
+  });
+}
+
+if (api.getLlmState) {
+  api.getLlmState().then((st) => {
+    if (st) {
+      state.llmSuggestionsEnabled = !!st.enabled;
+      state.llmModelDownloaded = !!st.downloaded;
+      state.llmDownloading = !!st.downloading;
+      if (st.modelDirUrl) state.llmModelDirUrl = st.modelDirUrl;
+      syncLlmSettingsUI();
+      if (state.llmSuggestionsEnabled && state.llmModelDownloaded) {
+        const worker = getOrCreateLlmWorker();
+        if (worker) worker.postMessage({ type: 'init', modelDirUrl: state.llmModelDirUrl });
+      }
     }
   });
 }
@@ -3915,8 +3982,10 @@ function activateOverlay(data) {
 
   if (typeof data.sensitivityLevel === 'number') applySensitivity(data.sensitivityLevel, false);
   if (typeof data.magicCueEnabled === 'boolean') state.magicCueEnabled = data.magicCueEnabled;
-  if (typeof data.magicCuePackDownloaded === 'boolean') state.magicCuePackDownloaded = data.magicCuePackDownloaded;
-  syncMagicCueSettingsUI();
+  if (typeof data.llmSuggestionsEnabled === 'boolean') state.llmSuggestionsEnabled = data.llmSuggestionsEnabled;
+  if (typeof data.llmModelDownloaded === 'boolean') state.llmModelDownloaded = data.llmModelDownloaded;
+  if (data.llmModelDirUrl) state.llmModelDirUrl = data.llmModelDirUrl;
+  syncLlmSettingsUI();
 
   if (!wasActive) {
     // New session: reset per-session launch timestamp, idle-hint & interaction flags (MainScreenStateFragmentPeer.java)
@@ -3982,7 +4051,7 @@ function activateOverlay(data) {
     openFte('enable-mp');
     setCursorType('select');
     updateFloatingPromptBoxPosition(state.cursorX, state.cursorY, true);
-  } else if (data.source === 'magic-cue-setup') {
+  } else if (data.source === 'llm-setup' || data.source === 'magic-cue-setup') {
     openFte('wiggle-adjust');
     setCursorType('select');
     updateFloatingPromptBoxPosition(state.cursorX, state.cursorY, true);
@@ -4115,14 +4184,23 @@ if (api.onMagicCueStateChange) {
   api.onMagicCueStateChange((st) => {
     if (!st) return;
     state.magicCueEnabled = !!st.enabled;
-    state.magicCuePackDownloaded = !!st.downloaded;
-    syncMagicCueSettingsUI();
     if (state.expanded) renderSuggestionChips();
   });
 }
 
-if (api.onMagicCueDownloadProgress) {
-  api.onMagicCueDownloadProgress((prog) => {
+if (api.onLlmStateChange) {
+  api.onLlmStateChange((st) => {
+    if (!st) return;
+    state.llmSuggestionsEnabled = !!st.enabled;
+    state.llmModelDownloaded = !!st.downloaded;
+    if (st.modelDirUrl) state.llmModelDirUrl = st.modelDirUrl;
+    syncLlmSettingsUI();
+    if (state.expanded) renderSuggestionChips();
+  });
+}
+
+if (api.onLlmDownloadProgress) {
+  api.onLlmDownloadProgress((prog) => {
     if (!prog) return;
     if (magicCueProgressWrap) magicCueProgressWrap.classList.remove('hidden');
     if (magicCueProgressFill && typeof prog.pct === 'number') {

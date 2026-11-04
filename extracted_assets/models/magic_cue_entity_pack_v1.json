@@ -1,0 +1,7 @@
+{
+  "version": "1.0.260916",
+  "bundled": true,
+  "classifier": "com.google.android.desktop.gpointer.app.magiccue.MagicCueTextClassifier",
+  "supportedEntities": ["email", "url", "address", "datetime", "flight", "phone"],
+  "excludedPackages": ["com.google.android.googlequicksearchbox"]
+}
