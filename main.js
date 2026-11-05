@@ -13,7 +13,9 @@ let sensitivityLevel = 2;
 let isDarkMode = true;
 // MagicCue is bundled with the app (1.2 MB entity classifier pack) and enabled by default!
 let magicCueEnabled = true;
-// Optional Lightweight Suggestion LLM (Xenova/LaMini-Flan-T5-77M quantized ONNX, ~92 MB):
+// Optional Multimodal Vision + Suggestion AI (~500 MB total int8 ONNX):
+// 1. Xenova/vit-gpt2-image-captioning (~237 MB int8 ONNX) — Vision-Language model that generates rich scene descriptions
+// 2. Xenova/LaMini-Flan-T5-248M (~265 MB int8 ONNX) — 248M instruction-tuned T5 model (>3x larger than 77M)
 // Off by default until the user downloads & enables it; falls back to instant default suggestions when not downloaded!
 let llmSuggestionsEnabled = false;
 let llmModelDownloaded = false;
@@ -26,13 +28,25 @@ let latestOcrInfo = null;
 
 const llmModelsBaseDir = path.join(app.getPath('userData'), 'odml_models');
 const LLM_DOWNLOAD_SPECS = [
-  { repo: 'Xenova/LaMini-Flan-T5-77M', dir: 'LaMini-Flan-T5-77M', rel: 'config.json', size: 2048 },
-  { repo: 'Xenova/LaMini-Flan-T5-77M', dir: 'LaMini-Flan-T5-77M', rel: 'generation_config.json', size: 512 },
-  { repo: 'Xenova/LaMini-Flan-T5-77M', dir: 'LaMini-Flan-T5-77M', rel: 'tokenizer.json', size: 2421760 },
-  { repo: 'Xenova/LaMini-Flan-T5-77M', dir: 'LaMini-Flan-T5-77M', rel: 'tokenizer_config.json', size: 2048 },
-  { repo: 'Xenova/LaMini-Flan-T5-77M', dir: 'LaMini-Flan-T5-77M', rel: 'special_tokens_map.json', size: 2048 },
-  { repo: 'Xenova/LaMini-Flan-T5-77M', dir: 'LaMini-Flan-T5-77M', rel: 'onnx/encoder_model_quantized.onnx', size: 35759104 },
-  { repo: 'Xenova/LaMini-Flan-T5-77M', dir: 'LaMini-Flan-T5-77M', rel: 'onnx/decoder_model_merged_quantized.onnx', size: 59339776 },
+  // 1. Instruction-Tuned Suggestion LLM: Xenova/LaMini-Flan-T5-248M (~265 MB int8 ONNX)
+  { repo: 'Xenova/LaMini-Flan-T5-248M', dir: 'LaMini-Flan-T5-248M', rel: 'config.json', size: 1541 },
+  { repo: 'Xenova/LaMini-Flan-T5-248M', dir: 'LaMini-Flan-T5-248M', rel: 'generation_config.json', size: 147 },
+  { repo: 'Xenova/LaMini-Flan-T5-248M', dir: 'LaMini-Flan-T5-248M', rel: 'tokenizer.json', size: 2422262 },
+  { repo: 'Xenova/LaMini-Flan-T5-248M', dir: 'LaMini-Flan-T5-248M', rel: 'tokenizer_config.json', size: 2457 },
+  { repo: 'Xenova/LaMini-Flan-T5-248M', dir: 'LaMini-Flan-T5-248M', rel: 'special_tokens_map.json', size: 2201 },
+  { repo: 'Xenova/LaMini-Flan-T5-248M', dir: 'LaMini-Flan-T5-248M', rel: 'onnx/encoder_model_quantized.onnx', size: 110502358 },
+  { repo: 'Xenova/LaMini-Flan-T5-248M', dir: 'LaMini-Flan-T5-248M', rel: 'onnx/decoder_model_merged_quantized.onnx', size: 164739632 },
+  // 2. Vision-Language Image Captioner: Xenova/vit-gpt2-image-captioning (~237 MB int8 ONNX)
+  { repo: 'Xenova/vit-gpt2-image-captioning', dir: 'vit-gpt2-image-captioning', rel: 'config.json', size: 4888 },
+  { repo: 'Xenova/vit-gpt2-image-captioning', dir: 'vit-gpt2-image-captioning', rel: 'generation_config.json', size: 184 },
+  { repo: 'Xenova/vit-gpt2-image-captioning', dir: 'vit-gpt2-image-captioning', rel: 'preprocessor_config.json', size: 378 },
+  { repo: 'Xenova/vit-gpt2-image-captioning', dir: 'vit-gpt2-image-captioning', rel: 'tokenizer.json', size: 2107928 },
+  { repo: 'Xenova/vit-gpt2-image-captioning', dir: 'vit-gpt2-image-captioning', rel: 'tokenizer_config.json', size: 456 },
+  { repo: 'Xenova/vit-gpt2-image-captioning', dir: 'vit-gpt2-image-captioning', rel: 'special_tokens_map.json', size: 131 },
+  { repo: 'Xenova/vit-gpt2-image-captioning', dir: 'vit-gpt2-image-captioning', rel: 'vocab.json', size: 798156 },
+  { repo: 'Xenova/vit-gpt2-image-captioning', dir: 'vit-gpt2-image-captioning', rel: 'onnx/encoder_model_quantized.onnx', size: 87453213 },
+  { repo: 'Xenova/vit-gpt2-image-captioning', dir: 'vit-gpt2-image-captioning', rel: 'onnx/decoder_model_merged_quantized.onnx', size: 158599996 },
+  // 3. Fast 1,000-Class Object Classifier: Xenova/resnet-50 (~25 MB int8 ONNX)
   { repo: 'Xenova/resnet-50', dir: 'resnet-50', rel: 'config.json', size: 69632 },
   { repo: 'Xenova/resnet-50', dir: 'resnet-50', rel: 'preprocessor_config.json', size: 512 },
   { repo: 'Xenova/resnet-50', dir: 'resnet-50', rel: 'onnx/model_quantized.onnx', size: 25787392 }
@@ -514,8 +528,8 @@ function createTray() {
       },
       {
         label: llmModelDownloaded
-          ? 'Smart Suggestion LLM (On-Device 77M)'
-          : 'Smart Suggestion LLM (Download Required — 92 MB)',
+          ? 'Smart Suggestion AI (On-Device 500 MB Vision + 248M LLM)'
+          : 'Smart Suggestion AI (Download Required — 500 MB)',
         type: 'checkbox',
         checked: llmSuggestionsEnabled,
         click: (item) => {

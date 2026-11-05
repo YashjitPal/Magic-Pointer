@@ -1093,16 +1093,69 @@ function processOcrResultIntoTextAOIs(ocrData) {
   // - OVERLAP_THRESHOLD = 0.1f
   // - ALIGNMENT_TOLERANCE = 0.05f
   // - VERT_GAP_LIMIT = 1.5f
+  // Note: On Windows, WinRT OcrEngine sometimes splits inline [brackets] / code tags into a separate OcrLine
+  // on the same row, or strips leading bullet glyphs ('o', '•') from the first line of a bulleted item.
+  // First, pre-merge any split line fragments that sit on the SAME horizontal row!
+  rawLines.sort((a, b) => a.boundingBox.top - b.boundingBox.top || a.boundingBox.left - b.boundingBox.left);
+  const mergedRowLines = [];
+  for (const line of rawLines) {
+    let joinedSameRow = false;
+    for (let i = mergedRowLines.length - 1; i >= 0; i--) {
+      const prev = mergedRowLines[i];
+      const pb = prev.boundingBox;
+      const lb = line.boundingBox;
+      const minH = Math.min(pb.height, lb.height);
+      const maxH = Math.max(pb.height, lb.height);
+      if (pb.bottom < lb.top - maxH) break;
+      const vOverlap = Math.min(pb.bottom, lb.bottom) - Math.max(pb.top, lb.top);
+      const centerYDiff = Math.abs((pb.top + pb.bottom) * 0.5 - (lb.top + lb.bottom) * 0.5);
+      const hGap = lb.left >= pb.right ? lb.left - pb.right : pb.left - lb.right;
+      if (
+        minH / Math.max(1, maxH) >= 0.45 &&
+        (vOverlap >= minH * 0.4 || centerYDiff <= maxH * 0.45) &&
+        hGap >= -maxH &&
+        hGap <= maxH * 4.5
+      ) {
+        const combinedElems = [...prev.elements, ...line.elements].sort(
+          (a, b) => a.boundingBox.left - b.boundingBox.left
+        );
+        pb.left = Math.min(pb.left, lb.left);
+        pb.top = Math.min(pb.top, lb.top);
+        pb.right = Math.max(pb.right, lb.right);
+        pb.bottom = Math.max(pb.bottom, lb.bottom);
+        pb.x = pb.left;
+        pb.y = pb.top;
+        pb.width = pb.right - pb.left;
+        pb.height = pb.bottom - pb.top;
+        prev.elements = combinedElems;
+        prev.text = combinedElems.map((e) => e.text).join(' ');
+        joinedSameRow = true;
+        break;
+      }
+    }
+    if (!joinedSameRow) {
+      mergedRowLines.push(line);
+    }
+  }
+
   const ALIGNMENT_HEIGHT_RATIO = 0.5;
   const OVERLAP_THRESHOLD = 0.1;
   const ALIGNMENT_TOLERANCE = 0.05;
-  const VERT_GAP_LIMIT = 1.5;
+  const VERT_GAP_LIMIT = 1.65;
 
-  let activeGroups = rawLines.map((line, idx) => ({
-    indices: new Set([idx]),
-    rect: { ...line.boundingBox },
-    meanCharHeight: Math.max(2, line.boundingBox.height)
-  }));
+  let activeGroups = mergedRowLines.map((line, idx) => {
+    // Compute true average character/word height (instead of union box height) so multi-line groups
+    // continue merging all lines of a paragraph!
+    const wordHeights = (line.elements || []).map((e) => e.boundingBox.height).filter((h) => h > 0);
+    const avgWordH = wordHeights.length
+      ? wordHeights.reduce((a, b) => a + b, 0) / wordHeights.length
+      : line.boundingBox.height;
+    return {
+      indices: new Set([idx]),
+      rect: { ...line.boundingBox },
+      meanCharHeight: Math.max(2, avgWordH)
+    };
+  });
 
   activeGroups.sort((a, b) => a.rect.top - b.rect.top);
 
@@ -1115,14 +1168,19 @@ function processOcrResultIntoTextAOIs(ocrData) {
     if (r1.left > r2.right || r2.left > r1.right) return false;
     const centerX1 = (r1.left + r1.right) * 0.5;
     const centerX2 = (r2.left + r2.right) * 0.5;
+    const leftDiff = Math.abs(r1.left - r2.left);
     const xAlignDiff = Math.min(
-      Math.abs(r1.left - r2.left),
+      leftDiff,
       Math.min(Math.round(Math.abs(centerX1 - centerX2)), Math.abs(r1.right - r2.right))
     );
-    const maxAllowedAlignDiff = Math.max(r1.width, r2.width) * ALIGNMENT_TOLERANCE;
-    if (xAlignDiff >= maxAllowedAlignDiff) return false;
+    // Allow either Google's 5% width tolerance OR up to 2.2x character height for bullet/hanging indent
+    const maxAllowedAlignDiff = Math.max(
+      Math.max(r1.width, r2.width) * ALIGNMENT_TOLERANCE,
+      Math.max(h1, h2) * 2.2
+    );
+    if (xAlignDiff > maxAllowedAlignDiff) return false;
     const gapY = Math.max(0, Math.max(r1.top, r2.top) - Math.min(r1.bottom, r2.bottom));
-    return gapY < Math.max(h1, h2) * VERT_GAP_LIMIT;
+    return gapY <= Math.max(h1, h2) * VERT_GAP_LIMIT;
   }
 
   function unionRects(r1, r2) {
@@ -1204,7 +1262,7 @@ function processOcrResultIntoTextAOIs(ocrData) {
   const blocks = [];
   for (const grp of activeGroups) {
     const groupLines = Array.from(grp.indices)
-      .map((idx) => rawLines[idx])
+      .map((idx) => mergedRowLines[idx])
       .filter(Boolean)
       .sort((a, b) => a.boundingBox.top - b.boundingBox.top);
     if (groupLines.length === 0) continue;
@@ -3047,11 +3105,22 @@ function buildInstantContextualGeminiPrompts(ocrText, visualLabels, count, hasFi
     add('Write documentation for this code');
   }
 
-  // 2. Math / Equations / Homework
-  if (/[=+\-*/^]{2,}|\b(solve|equation|integral|derivative|matrix|theorem|calculus|algebra|physics)\b/i.test(ocrLower)) {
+  // 2. Math / Equations / Study / Exam Prep / Textbooks (e.g. ICSE, ISC, CBSE, ML Aggarwal, Class 12)
+  if (/\b(exam|board|icse|isc|cbse|jee|neet|sat|textbook|chapter|exercise|solved example|syllabus|grade|topper|study|homework)\b/i.test(ocrLower)) {
+    add('Create a study plan from this');
+    add('Give me key practice questions');
+    add('Summarize the core study tips');
+  } else if (/[=+\-*/^]{2,}|\b(solve|equation|integral|derivative|matrix|theorem|calculus|algebra|physics|chemistry)\b/i.test(ocrLower)) {
     add('Solve this step by step');
     add('Explain the formula used here');
     add('Give me similar practice problems');
+  }
+
+  // 2b. Gaming / Controllers / Consoles / Video Games
+  if (/\b(joystick|gamepad|controller|playstation|ps5|xbox|nintendo|console|gaming|steam|gameplay)\b/i.test(`${ocrLower} ${allVisualText}`)) {
+    add('Identify this controller model');
+    add('Compare features and compatibility');
+    add('Where can I buy this controller?');
   }
 
   // 3. System Notification / Warning / Troubleshooting (Example 6)
@@ -3130,9 +3199,9 @@ function buildInstantContextualGeminiPrompts(ocrText, visualLabels, count, hasFi
   // 11. Text / Article / Short Phrase Fallbacks
   if (pool.length < 3) {
     if (ocr.length > 100) {
-      add('Summarize this article');
-      add('Explain the key concepts here');
-      add('Extract key takeaways');
+      add('Summarize the key points here');
+      add('Turn this into a bulleted checklist');
+      add('Explain the main concepts simply');
     } else if (ocr.length > 0) {
       const cleanWords = ocr.replace(/[^\w\s'-]/g, ' ').trim().split(/\s+/).filter(Boolean);
       const preview = cleanWords.slice(0, 4).join(' ') + (cleanWords.length > 4 ? '…' : '');
@@ -4191,7 +4260,7 @@ function syncLlmSettingsUI() {
   }
   btnMagicCueAction.disabled = false;
   if (!state.llmModelDownloaded) {
-    magicCueBadge.textContent = 'Optional · 92 MB';
+    magicCueBadge.textContent = 'Optional · 500 MB';
     magicCueBadge.classList.remove('installed');
     btnMagicCueAction.textContent = 'Download & Enable';
     btnMagicCueAction.classList.remove('active');
