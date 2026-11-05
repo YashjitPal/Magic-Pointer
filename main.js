@@ -346,7 +346,11 @@ function startNativeWatcher() {
           activateMagicPointer(msg.x, msg.y, 'shake');
         } else if (msg.type === 'hotkey') {
           if (isMagicPointerActive) {
-            deactivateMagicPointer();
+            if (overlayWindow && !overlayWindow.isDestroyed()) {
+              overlayWindow.webContents.send('magic-pointer:esc-key');
+            } else {
+              deactivateMagicPointer();
+            }
           } else {
             activateMagicPointer(msg.x, msg.y, 'hotkey');
           }

@@ -2419,6 +2419,7 @@ function updateCustomCursorTransform() {
 
 // Port of MainScreenKt.calculateClampedPromptBoxOffset
 function updateFloatingPromptBoxPosition(targetCursorX, targetCursorY, snapImmediately = false) {
+  if (state.isExiting) return;
   if ((state.expanded && !state.isCollapsed) && !state.selectingMoreScreen && !snapImmediately) return;
   if (!snapImmediately && state.lastFollowX !== null && !state.jumpFading) {
     const dist = Math.hypot(targetCursorX - state.lastFollowX, targetCursorY - state.lastFollowY);
@@ -4491,20 +4492,43 @@ function playSaveDraftAndExitAnimation() {
 function playExitWithoutSavingAnimation() {
   if (state.isExiting) return;
   state.isExiting = true;
-  const startH = promptBox.offsetHeight;
-  promptBox.style.height = `${startH}px`;
-  promptBox.style.transition = `height 150ms var(--emphasized-accel-easing)`;
-  void promptBox.offsetWidth;
-  expandedStateWrapper.classList.add('exiting-without-saving');
-  promptBox.classList.add('exiting-without-saving');
-  promptBox.style.height = `${Math.max(0, startH - 48)}px`;
-  // Point 6: Smoothly fade out the translucent scrim tint when Magic Pointer exits!
+  floatingAnchor.classList.remove('first-entry');
+
+  // Clear any hovered AOI shader and restore normal cursor immediately on exit (MainScreenKt.java:55942)
+  clearTimeout(state.hoverDelayTimer);
+  state.hoveredAoi = null;
+  state.renderedHoverAoi = null;
+  state.hoverCardAlpha = 0;
+  state.scrimCutOutAlpha = 0;
+  state.scrimDirty = true;
+  setCursorType('select');
+
+  const hasExpandedRows = !contentArea.classList.contains('hidden');
+  if (hasExpandedRows) {
+    // Multi-row expanded PromptBox (with selected AOI thumbnails):
+    // Shrink container height by 48dp over 150ms EMPHASIZED_ACCELERATE_EASING while fading out over 200ms
+    const startH = promptBox.offsetHeight;
+    promptBox.style.height = `${startH}px`;
+    promptBox.style.transition = `height 150ms var(--emphasized-accel-easing)`;
+    void promptBox.offsetWidth;
+    expandedStateWrapper.classList.add('exiting-without-saving');
+    promptBox.classList.add('exiting-without-saving');
+    promptBox.style.height = `${Math.max(52, startH - 48)}px`;
+  } else {
+    // Initial 1-line "Point and select to ask Gemini" / "Ask Gemini" pill (no selected items):
+    // Pure GPU-composited fade + subtle scale/lift out over 180ms with zero layout height crushing!
+    void promptBox.offsetWidth;
+    expandedStateWrapper.classList.add('exiting-without-saving', 'exiting-empty-pill');
+    promptBox.classList.add('exiting-without-saving', 'exiting-empty-pill');
+  }
+
+  // Smoothly fade out the translucent scrim tint when Magic Pointer exits!
   scrimCanvas.classList.remove('visible');
   beginChipExit();
 
   setTimeout(() => {
-    expandedStateWrapper.classList.remove('exiting-without-saving');
-    promptBox.classList.remove('exiting-without-saving');
+    expandedStateWrapper.classList.remove('exiting-without-saving', 'exiting-empty-pill');
+    promptBox.classList.remove('exiting-without-saving', 'exiting-empty-pill');
     promptBox.style.height = '';
     promptBox.style.transition = '';
     recordShakeDismissOnFinish();

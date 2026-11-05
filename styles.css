@@ -265,11 +265,17 @@ button, textarea, input, div, a, span, canvas, img, svg, path, p, h1, h2, kbd {
 /* Exit Without Saving Animation (PromptBoxKt.java:1680-1736 & 2020-2031):
    - Container fade out: 200ms LinearEasing
    - Content fade out: 100ms LinearEasing
-   - Height shrink: 48dp over 150ms EMPHASIZED_ACCELERATE_EASING (cubic-bezier(0.3, 0, 0.8, 0.15)) */
+   - Height shrink (when multi-row ContentArea is open): 48dp over 150ms EMPHASIZED_ACCELERATE_EASING (cubic-bezier(0.3, 0, 0.8, 0.15))
+   - Empty 1-line pill ("Ask Gemini" when Esc pressed without selecting anything): pure GPU-composited scale(0.92) + translateY(-6px) + fade out! */
 .expanded-state-wrapper.exiting-without-saving {
   opacity: 0;
-  transition: opacity 200ms var(--linear-easing) !important;
+  transition: opacity 180ms var(--linear-easing), transform 180ms var(--emphasized-accel-easing) !important;
   pointer-events: none;
+}
+
+.expanded-state-wrapper.exiting-without-saving.exiting-empty-pill {
+  transform-origin: center center;
+  transform: translate3d(0, -6px, 0) scale(0.92);
 }
 
 .prompt-box.exiting-without-saving {
@@ -277,10 +283,15 @@ button, textarea, input, div, a, span, canvas, img, svg, path, p, h1, h2, kbd {
   pointer-events: none;
 }
 
-.prompt-box.exiting-without-saving .content-area,
-.prompt-box.exiting-without-saving .context-controls {
+.prompt-box.exiting-without-saving:not(.exiting-empty-pill) .content-area,
+.prompt-box.exiting-without-saving:not(.exiting-empty-pill) .context-controls {
   opacity: 0;
   transition: opacity 100ms var(--linear-easing) !important;
+}
+
+.prompt-box.exiting-without-saving.exiting-empty-pill .context-controls {
+  opacity: 0;
+  transition: opacity 150ms var(--linear-easing) !important;
 }
 
 @keyframes collapsedToExpandedEnter {
