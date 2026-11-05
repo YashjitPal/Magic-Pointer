@@ -1088,102 +1088,41 @@ function processOcrResultIntoTextAOIs(ocrData) {
     }
   }
 
-  // Exact port of HeuristicClusteringRule.java (enabled by default in OcrClusterFlagsImpl.smali:51 where 45841355 = FALSE):
+  // Exact 1:1 port of HeuristicClusteringRule.java (lines 48-58, 271-460) + OcrClusterConfig.java (lines 9-21):
   // - ALIGNMENT_HEIGHT_RATIO = 0.5f
   // - OVERLAP_THRESHOLD = 0.1f
   // - ALIGNMENT_TOLERANCE = 0.05f
   // - VERT_GAP_LIMIT = 1.5f
-  // Note: On Windows, WinRT OcrEngine sometimes splits inline [brackets] / code tags into a separate OcrLine
-  // on the same row. First, pre-merge any split line fragments that sit on the SAME horizontal row AND within
-  // LineSplitRule's 4.0 * avgCharWidth horizontal threshold (so sidebar items NEVER merge across columns into main content!).
-  rawLines.sort((a, b) => a.boundingBox.top - b.boundingBox.top || a.boundingBox.left - b.boundingBox.left);
-  const mergedRowLines = [];
-  for (const line of rawLines) {
-    let joinedSameRow = false;
-    for (let i = mergedRowLines.length - 1; i >= 0; i--) {
-      const prev = mergedRowLines[i];
-      const pb = prev.boundingBox;
-      const lb = line.boundingBox;
-      const minH = Math.min(pb.height, lb.height);
-      const maxH = Math.max(pb.height, lb.height);
-      if (pb.bottom < lb.top - maxH) break;
-      const vOverlap = Math.min(pb.bottom, lb.bottom) - Math.max(pb.top, lb.top);
-      const centerYDiff = Math.abs((pb.top + pb.bottom) * 0.5 - (lb.top + lb.bottom) * 0.5);
-      const hGap = lb.left >= pb.right ? lb.left - pb.right : pb.left - lb.right;
-      // LineSplitRule.java:287: threshold = 4.0f * avgCharDim (approx 1.8 * lineHeight).
-      // Never merge across a column gap wider than 1.8 * minH (e.g. sidebar -> article column)!
-      const maxSameRowGap = Math.min(36, minH * 1.8);
-      if (
-        minH / Math.max(1, maxH) >= 0.6 &&
-        (vOverlap >= minH * 0.45 || centerYDiff <= maxH * 0.35) &&
-        hGap >= -minH * 0.5 &&
-        hGap <= maxSameRowGap
-      ) {
-        const combinedElems = [...prev.elements, ...line.elements].sort(
-          (a, b) => a.boundingBox.left - b.boundingBox.left
-        );
-        pb.left = Math.min(pb.left, lb.left);
-        pb.top = Math.min(pb.top, lb.top);
-        pb.right = Math.max(pb.right, lb.right);
-        pb.bottom = Math.max(pb.bottom, lb.bottom);
-        pb.x = pb.left;
-        pb.y = pb.top;
-        pb.width = pb.right - pb.left;
-        pb.height = pb.bottom - pb.top;
-        prev.elements = combinedElems;
-        prev.text = combinedElems.map((e) => e.text).join(' ');
-        joinedSameRow = true;
-        break;
-      }
-    }
-    if (!joinedSameRow) {
-      mergedRowLines.push(line);
-    }
-  }
-
-  const ALIGNMENT_HEIGHT_RATIO = 0.55;
+  const ALIGNMENT_HEIGHT_RATIO = 0.5;
   const OVERLAP_THRESHOLD = 0.1;
   const ALIGNMENT_TOLERANCE = 0.05;
-  const VERT_GAP_LIMIT = 1.45;
+  const VERT_GAP_LIMIT = 1.5;
 
-  let activeGroups = mergedRowLines.map((line, idx) => {
-    const wordHeights = (line.elements || []).map((e) => e.boundingBox.height).filter((h) => h > 0);
-    const avgWordH = wordHeights.length
-      ? wordHeights.reduce((a, b) => a + b, 0) / wordHeights.length
-      : line.boundingBox.height;
-    return {
-      indices: new Set([idx]),
-      rect: { ...line.boundingBox },
-      meanCharHeight: Math.max(2, avgWordH)
-    };
-  });
+  let activeGroups = rawLines.map((line, idx) => ({
+    indices: new Set([idx]),
+    rect: { ...line.boundingBox },
+    meanCharHeight: Math.max(2, line.boundingBox.height)
+  }));
 
   activeGroups.sort((a, b) => a.rect.top - b.rect.top);
 
   function canMergePairwise(g1, g2) {
     const h1 = g1.meanCharHeight;
     const h2 = g2.meanCharHeight;
-    // Prevent merging a larger heading (e.g. "3. The Brain...") with smaller body text
     if (Math.min(h1, h2) / Math.max(h1, h2) < ALIGNMENT_HEIGHT_RATIO) return false;
     const r1 = g1.rect;
     const r2 = g2.rect;
     if (r1.left > r2.right || r2.left > r1.right) return false;
     const centerX1 = (r1.left + r1.right) * 0.5;
     const centerX2 = (r2.left + r2.right) * 0.5;
-    const leftDiff = Math.abs(r1.left - r2.left);
     const xAlignDiff = Math.min(
-      leftDiff,
+      Math.abs(r1.left - r2.left),
       Math.min(Math.round(Math.abs(centerX1 - centerX2)), Math.abs(r1.right - r2.right))
     );
-    // Allow Google's 5% width tolerance OR up to 28px for a bullet point ('•' / 'o') indent,
-    // but NEVER across different layout columns (leftDiff must be <= 32px if left-aligned)!
-    const maxAllowedAlignDiff = Math.min(
-      32,
-      Math.max(Math.max(r1.width, r2.width) * ALIGNMENT_TOLERANCE, Math.max(h1, h2) * 1.8)
-    );
-    if (xAlignDiff > maxAllowedAlignDiff) return false;
+    const maxAllowedAlignDiff = Math.max(r1.width, r2.width) * ALIGNMENT_TOLERANCE;
+    if (xAlignDiff >= maxAllowedAlignDiff) return false;
     const gapY = Math.max(0, Math.max(r1.top, r2.top) - Math.min(r1.bottom, r2.bottom));
-    return gapY <= Math.max(h1, h2) * VERT_GAP_LIMIT;
+    return gapY < Math.max(h1, h2) * VERT_GAP_LIMIT;
   }
 
   function unionRects(r1, r2) {
@@ -1265,7 +1204,7 @@ function processOcrResultIntoTextAOIs(ocrData) {
   const blocks = [];
   for (const grp of activeGroups) {
     const groupLines = Array.from(grp.indices)
-      .map((idx) => mergedRowLines[idx])
+      .map((idx) => rawLines[idx])
       .filter(Boolean)
       .sort((a, b) => a.boundingBox.top - b.boundingBox.top);
     if (groupLines.length === 0) continue;
