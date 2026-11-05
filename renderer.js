@@ -2797,19 +2797,8 @@ function recordShakeTrigger() {
 }
 
 function shouldShowShakeInterventionNow() {
-  const now = Date.now();
-  if (
-    state.lastShakeInterventionShownMs > 0 &&
-    now >= state.lastShakeInterventionShownMs &&
-    now - state.lastShakeInterventionShownMs < SHAKE_COOLDOWN_WINDOW_MS
-  ) {
-    return false;
-  }
-  const cutoff = now - SHAKE_INTERVENTION_WINDOW_MS;
-  state.mistriggerTimestampsMs = state.mistriggerTimestampsMs.filter((t) => t >= cutoff);
-  const activeTriggerCount = state.lastShakeTriggerMs > 0 ? 1 : 0;
-  const totalCount = state.mistriggerTimestampsMs.length + activeTriggerCount;
-  return totalCount >= SHAKE_TRIGGER_COUNT_THRESHOLD;
+  // Disabled per user request: drop the wiggle-triggered "Change cursor wiggling sensitivity?" pre-warning popup
+  return false;
 }
 
 function recordShakeInterventionShown() {

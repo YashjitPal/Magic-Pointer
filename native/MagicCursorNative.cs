@@ -1711,20 +1711,25 @@ namespace MagicCursorNative
                 return appHwnd;
             }
 
+            // Cold launch: the target AI Desktop App is completely closed (or hidden to tray).
+            // Launch it, wait for its window to appear, resize into the companion window,
+            // and give its web UI time to mount the composer input before pasting!
             bool launchedExe = TryLaunchAiDesktopAppExecutable(app);
             if (!launchedExe && app == "gemini")
             {
                 SendWinShiftG();
             }
 
-            for (int i = 0; i < 32; i++)
+            for (int i = 0; i < 45; i++)
             {
-                Thread.Sleep(125);
+                Thread.Sleep(150);
                 appHwnd = FindAiDesktopAppWindow(app);
                 if (appHwnd != IntPtr.Zero)
                 {
                     ResizeAndFocusCompanionWindow(appHwnd);
-                    Thread.Sleep(550);
+                    Thread.Sleep(1100);
+                    ResizeAndFocusCompanionWindow(appHwnd);
+                    Thread.Sleep(250);
                     return appHwnd;
                 }
             }
