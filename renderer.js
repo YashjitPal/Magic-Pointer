@@ -3989,6 +3989,25 @@ function updateCursorTypeForTarget(target) {
   }
 }
 
+function findNearestOcrTextAoiAt(cx, cy, maxPad = 14) {
+  let best = null;
+  let bestDist = Infinity;
+  for (const aoi of state.ocrTextAOIs) {
+    if (!aoi || !aoi.parsedText || !aoi.rect) continue;
+    const r = aoi.rect;
+    const dx = Math.max(0, r.x - cx, cx - (r.x + r.width));
+    const dy = Math.max(0, r.y - cy, cy - (r.y + r.height));
+    if (dx <= maxPad && dy <= maxPad) {
+      const d = Math.hypot(dx, dy);
+      if (d < bestDist) {
+        bestDist = d;
+        best = aoi;
+      }
+    }
+  }
+  return best;
+}
+
 function handleLocalPointerMove(e) {
   state.lastLocalPointerMoveMs = performance.now();
   state.cursorX = e.clientX;
@@ -4006,12 +4025,16 @@ function handleLocalPointerMove(e) {
     if (inSelection && !state.isDraggingAOI && !state.isTextSelecting) {
       const dist = Math.hypot(e.clientX - state.dragStartX, e.clientY - state.dragStartY);
       if (dist >= 4) {
-        // MainScreenKt$mainScreenDragGestures$1.java:56946-56966:
-        // If currentAoi?.parsedText != null when drag starts -> peer.updateIsTextSelecting(true)!
-        // Otherwise -> peer.updateIsDragging(true)!
-        if (state.hoveredAoi && state.hoveredAoi.parsedText) {
+        // Use the text AOI captured at mousedown (or current/nearby text AOI) so moving 4px out of a word
+        // NEVER drops text-selection mode into rectangle-crop mode!
+        const startTextAoi =
+          (state.dragStartTextAoi && state.dragStartTextAoi.parsedText ? state.dragStartTextAoi : null) ||
+          (state.hoveredAoi && state.hoveredAoi.parsedText ? state.hoveredAoi : null) ||
+          findNearestOcrTextAoiAt(state.dragStartX, state.dragStartY, 18) ||
+          findNearestOcrTextAoiAt(e.clientX, e.clientY, 14);
+        if (startTextAoi) {
           state.isTextSelecting = true;
-          state.textSelectionAoi = state.hoveredAoi;
+          state.textSelectionAoi = startTextAoi;
           state.textSelStartX = state.dragStartX;
           state.textSelStartY = state.dragStartY;
           state.textSelEndX = e.clientX;
@@ -4056,10 +4079,14 @@ scrimCanvas.addEventListener('mousedown', (e) => {
   if (state.pendingTextSelection) {
     dismissTextSelectionActions(true);
   }
+  updateHoveredAoiForCursor(e.clientX, e.clientY);
   state.isPointerDownOnScrim = true;
   state.isDraggingAOI = false;
   state.isTextSelecting = false;
   state.textSelectionAoi = null;
+  state.dragStartTextAoi =
+    (state.hoveredAoi && state.hoveredAoi.parsedText ? state.hoveredAoi : null) ||
+    findNearestOcrTextAoiAt(e.clientX, e.clientY, 18);
   state.dragStartX = e.clientX;
   state.dragStartY = e.clientY;
   state.dragCurrentX = e.clientX;
@@ -4099,10 +4126,10 @@ window.addEventListener('mouseup', async (e) => {
   state.scrimDirty = true;
 
   if (wasTextSelecting && textAoi) {
-    // Point 3: The Copy & Plus circle feature ONLY appears when nothing is already selected in the PromptBox
-    // (`state.selectedAOIs.length === 0 && !state.selectingMoreScreen`).
-    // If the user clicked the '+' button on the PromptBox (or already has items in the PromptBox),
-    // selecting text adds it directly to the PromptBox!
+    // Point 3: Whenever NO items are currently attached in the PromptBox (`state.selectedAOIs.length === 0`)
+    // and Ctrl is not held, selecting text ALWAYS shows the Copy & Plus circles first!
+    // Only if the user already has items attached in the PromptBox (`state.selectedAOIs.length > 0`)
+    // or is holding Ctrl for multi-select does it attach directly to the PromptBox!
     const pageSel = getSelectedTextAndGeometryFromPage(
       state.textSelStartX,
       state.textSelStartY,
@@ -4112,8 +4139,6 @@ window.addEventListener('mouseup', async (e) => {
     if (pageSel && pageSel.text && pageSel.text.trim()) {
       const canShowCopyActions =
         state.selectedAOIs.length === 0 &&
-        !state.selectingMoreScreen &&
-        !state.hasUserEnteredContentBefore &&
         !e.ctrlKey &&
         !state.ctrlPressed;
 
@@ -4182,9 +4207,26 @@ window.addEventListener('mouseup', async (e) => {
     // Tap without drag on scrimCanvas (MainScreenKt$mainScreenTapGestures$1$1.java:56651-56706)
     if (state.aoiSelectionMode || state.isCollapsed || state.selectingMoreScreen) {
       if (state.hoveredAoi && state.hoveredAoi.rect && state.selectedAOIs.length < 10) {
-        // MainScreenKt$mainScreenTapGestures$1$1.java:56665-56672:
-        // Clicking a text block adds it directly to the PromptBox (Copy/Plus circles are only for drag-selecting text when nothing is selected)
+        // Clicking a text block when items are already attached (or holding Ctrl) adds it directly;
+        // when 0 items are attached, show the Copy & Plus circles so text is NEVER attached without showing Copy/Plus first!
         if (state.hoveredAoi.parsedText && state.hoveredAoi.parsedText.text) {
+          const canShowCopyOnTap =
+            state.selectedAOIs.length === 0 &&
+            !e.ctrlKey &&
+            !state.ctrlPressed;
+          if (canShowCopyOnTap) {
+            const tapBlock = state.hoveredAoi.parsedText;
+            const tapRect = state.hoveredAoi.rect;
+            const tapLineRects = Array.isArray(tapBlock.lines) && tapBlock.lines.length > 0
+              ? tapBlock.lines.map((ln) => ln.boundingBox).filter(Boolean)
+              : [{ left: tapRect.x, top: tapRect.y, right: tapRect.x + tapRect.width, bottom: tapRect.y + tapRect.height, x: tapRect.x, y: tapRect.y, width: tapRect.width, height: tapRect.height }];
+            showTextSelectionActions({
+              text: tapBlock.text.trim(),
+              rect: tapRect,
+              lineRects: tapLineRects
+            });
+            return;
+          }
           await addSelectedTextCardToDraft(state.hoveredAoi.parsedText.text, state.hoveredAoi);
         } else {
           const hRect = state.hoveredAoi.rect;
@@ -5180,9 +5222,14 @@ api.onCursorMove((data) => {
       if (inSelection && !state.isDraggingAOI && !state.isTextSelecting) {
         const dist = Math.hypot(data.x - state.dragStartX, data.y - state.dragStartY);
         if (dist >= 4) {
-          if (state.hoveredAoi && state.hoveredAoi.parsedText) {
+          const startTextAoi =
+            (state.dragStartTextAoi && state.dragStartTextAoi.parsedText ? state.dragStartTextAoi : null) ||
+            (state.hoveredAoi && state.hoveredAoi.parsedText ? state.hoveredAoi : null) ||
+            findNearestOcrTextAoiAt(state.dragStartX, state.dragStartY, 18) ||
+            findNearestOcrTextAoiAt(data.x, data.y, 14);
+          if (startTextAoi) {
             state.isTextSelecting = true;
-            state.textSelectionAoi = state.hoveredAoi;
+            state.textSelectionAoi = startTextAoi;
             state.textSelStartX = state.dragStartX;
             state.textSelStartY = state.dragStartY;
             state.textSelEndX = data.x;
