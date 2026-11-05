@@ -235,6 +235,17 @@ function createOverlayWindow() {
 
   overlayWindow.loadFile('index.html');
 
+  overlayWindow.on('blur', () => {
+    // Exact port of MainActivityPeer.onWindowFocusChanged(false) -> scheduleDismissal (MainActivityPeer.java:1520-1670):
+    // When another app or screenshot tool (Snipping Tool, Alt+Tab, etc.) takes foreground focus,
+    // automatically turn off Magic Pointer!
+    setTimeout(() => {
+      if (isMagicPointerActive && overlayWindow && !overlayWindow.isDestroyed() && !overlayWindow.isFocused()) {
+        deactivateMagicPointer();
+      }
+    }, 120);
+  });
+
   overlayWindow.once('ready-to-show', () => {
     overlayWindow.setBounds({ x, y, width, height });
     overlayWindow.showInactive();
@@ -347,6 +358,10 @@ function startNativeWatcher() {
         } else if (msg.type === 'esc') {
           if (isMagicPointerActive && overlayWindow && !overlayWindow.isDestroyed()) {
             overlayWindow.webContents.send('magic-pointer:esc-key');
+          }
+        } else if (msg.type === 'focus_lost') {
+          if (isMagicPointerActive) {
+            deactivateMagicPointer();
           }
         } else if (msg.type === 'move') {
           if (isMagicPointerActive && overlayWindow && !overlayWindow.isDestroyed()) {

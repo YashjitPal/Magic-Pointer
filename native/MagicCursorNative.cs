@@ -174,6 +174,9 @@ namespace MagicCursorNative
         const byte VK_CONTROL = 0x11;  // Ctrl
         const byte VK_RETURN = 0x0D;   // Enter
         const byte VK_ESCAPE = 0x1B;   // Esc
+        const byte VK_SHIFT = 0x10;    // Shift
+        const byte VK_SNAPSHOT = 0x2C; // Print Screen (PrtScn)
+        const byte VK_S = 0x53;        // S
         const byte VK_LWIN = 0x5B;     // Left Windows key
         const byte VK_RWIN = 0x5C;     // Right Windows key
         const byte VK_G = 0x47;
@@ -199,6 +202,8 @@ namespace MagicCursorNative
         // MIN_WIGGLE_SPEED = 0, MAX_WIGGLE_SPEED = 3, DEFAULT_WIGGLE_SPEED = 2
         static volatile int SensitivityLevel = 2;
         static volatile bool OverlayActive = false;
+        static volatile bool HadOverlayFocus = false;
+        static long OverlayActivatedAtMs = 0;
         static IntPtr OverlayHwnd = IntPtr.Zero;
         static readonly object BitmapLock = new object();
         static readonly object StdoutLock = new object();
@@ -866,11 +871,14 @@ namespace MagicCursorNative
                             OverlayActive = line.Substring("ACTIVE:".Length).Trim() == "1";
                             if (OverlayActive)
                             {
+                                HadOverlayFocus = false;
+                                OverlayActivatedAtMs = Environment.TickCount & Int32.MaxValue;
                                 EnforceFullScreenOverlayBounds();
                                 HideWindowsSystemCursors();
                             }
                             else
                             {
+                                HadOverlayFocus = false;
                                 RestoreWindowsSystemCursors();
                             }
                         }
@@ -956,15 +964,58 @@ namespace MagicCursorNative
                 }
                 prevWinGDown = winGDown;
 
-                // Check rising-edge Esc key and stream cursor position when overlay is active
+                // Check rising-edge Esc key, screenshot keys (PrtScn / Win+Shift+S), foreground focus loss,
+                // and stream cursor position when overlay is active
                 if (OverlayActive)
                 {
                     bool escDown = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
-                    if (escDown && !prevEscDown)
+                    bool prtScnDown = (GetAsyncKeyState(VK_SNAPSHOT) & 0x8000) != 0;
+                    bool shiftDown = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+                    bool sDown = (GetAsyncKeyState(VK_S) & 0x8000) != 0;
+                    bool winShiftSDown = winDown && shiftDown && sDown;
+
+                    if ((escDown && !prevEscDown) || prtScnDown || winShiftSDown)
                     {
-                        EmitJsonLine("{\"type\":\"esc\"}");
+                        EmitJsonLine(prtScnDown || winShiftSDown ? "{\"type\":\"focus_lost\"}" : "{\"type\":\"esc\"}");
                     }
                     prevEscDown = escDown;
+
+                    // MainActivityPeer.java:1520-1670 (onWindowFocusChanged / dismissOnFocusLoss):
+                    // If another app or screenshot tool (Snipping Tool, ScreenClippingHost, Lightshot, ShareX, Alt+Tab, etc.)
+                    // takes over foreground focus, automatically dismiss Magic Pointer!
+                    if (OverlayHwnd != IntPtr.Zero)
+                    {
+                        IntPtr fg = GetForegroundWindow();
+                        if (fg == OverlayHwnd)
+                        {
+                            HadOverlayFocus = true;
+                        }
+                        else if (fg != IntPtr.Zero)
+                        {
+                            StringBuilder clsSb = new StringBuilder(128);
+                            GetClassName(fg, clsSb, 128);
+                            string cls = clsSb.ToString();
+                            StringBuilder titleSb = new StringBuilder(256);
+                            GetWindowText(fg, titleSb, 256);
+                            string title = titleSb.ToString();
+
+                            bool isScreenshotOverlay =
+                                cls.IndexOf("ScreenClipping", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                title.IndexOf("Snipping", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                title.IndexOf("Screen Snip", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                title.IndexOf("Lightshot", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                title.IndexOf("ShareX", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                title.IndexOf("Greenshot", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                title.IndexOf("Flameshot", StringComparison.OrdinalIgnoreCase) >= 0;
+
+                            int curTick = Environment.TickCount & Int32.MaxValue;
+                            if (isScreenshotOverlay || (HadOverlayFocus && (curTick - OverlayActivatedAtMs) > 450))
+                            {
+                                HadOverlayFocus = false;
+                                EmitJsonLine("{\"type\":\"focus_lost\"}");
+                            }
+                        }
+                    }
 
                     if (pt.X != prevPt.X || pt.Y != prevPt.Y)
                     {

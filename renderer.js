@@ -1792,6 +1792,7 @@ function resizeCanvases() {
 window.addEventListener('resize', resizeCanvases);
 resizeCanvases();
 initWebGLShader();
+redrawScrimCanvas();
 
 function redrawScrimCanvas() {
   state.scrimDirty = false;
@@ -1805,10 +1806,14 @@ function redrawScrimCanvas() {
   ctx.fillStyle = 'rgba(0, 0, 0, 0.32)';
   ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
 
-  // Cutout is drawn ONLY when (isTabletMode && shouldDrawManualAoi) || (!isTabletMode && aoiSelectionMode)
-  const inSelection = state.aoiSelectionMode || state.isCollapsed || state.selectingMoreScreen || state.isDraggingAOI;
+  // Cutout is drawn when in selection mode OR while a screen AOI crop is in-flight (`state.croppingAoiRect`)
+  const inSelection = state.aoiSelectionMode || state.isCollapsed || state.selectingMoreScreen || state.isDraggingAOI || !!state.croppingAoiRect;
   if (inSelection) {
-    const activeDragRect = state.isDraggingAOI ? constrainAoiRectToScreen(getNormalizedDragRect()) : null;
+    const activeDragRect = state.isDraggingAOI
+      ? constrainAoiRectToScreen(getNormalizedDragRect())
+      : state.croppingAoiRect
+        ? constrainAoiRectToScreen(state.croppingAoiRect)
+        : null;
     const livePageSel = state.isTextSelecting
       ? getSelectedTextAndGeometryFromPage(state.textSelStartX, state.textSelStartY, state.textSelEndX, state.textSelEndY)
       : state.pendingTextSelection;
@@ -1944,8 +1949,12 @@ function renderFrame(now) {
     //     - Active drag selection (EffectState.LOOP: immediate cardAmbientConfig)
     //     - Hovered non-fullscreen window AOI (EffectState.ENTRY: cardEntryConfig -> cardAmbientConfig over 500ms after ambientTransitionDelay)
     //     Expanded by AOI_PADDING_DP = 8dp on each side (+16dp width/height), cornerRadius = 12dp.
-    const inSelection = state.aoiSelectionMode || state.isCollapsed || state.selectingMoreScreen;
-    const activeDragRect = state.isDraggingAOI ? constrainAoiRectToScreen(getNormalizedDragRect()) : null;
+    const inSelection = state.aoiSelectionMode || state.isCollapsed || state.selectingMoreScreen || !!state.croppingAoiRect;
+    const activeDragRect = state.isDraggingAOI
+      ? constrainAoiRectToScreen(getNormalizedDragRect())
+      : state.croppingAoiRect
+        ? constrainAoiRectToScreen(state.croppingAoiRect)
+        : null;
     const livePageSelRect = state.isTextSelecting
       ? (getSelectedTextAndGeometryFromPage(state.textSelStartX, state.textSelStartY, state.textSelEndX, state.textSelEndY) || {}).rect
       : state.pendingTextSelection && state.pendingTextSelection.rect;
@@ -3088,6 +3097,9 @@ function renderCollapsedThumbnailFan() {
 
 function renderScreenAOICards() {
   state.scrimDirty = true;
+  // Redraw scrimCanvas synchronously so removing or updating DOM children inside aoiCardsLayer
+  // NEVER causes a 1-frame transparent flicker in Chromium's compositor!
+  redrawScrimCanvas();
   aoiCardsLayer.innerHTML = '';
   const screenAOIs = state.selectedAOIs.filter((a) => a.type === 'screen' && a.rect);
   screenAOIs.forEach((aoi, idx) => {
@@ -3999,7 +4011,10 @@ window.addEventListener('mouseup', async (e) => {
   const rect = getNormalizedDragRect();
   if (wasDragging && rect.width >= 16 && rect.height >= 16) {
     if (state.selectedAOIs.length < 10) {
+      state.croppingAoiRect = rect;
+      redrawScrimCanvas();
       const crop = await api.cropAOI(rect);
+      state.croppingAoiRect = null;
       if (crop) {
         const containedText = (crop.ocrText && crop.ocrText.trim()) || fetchContainedOcrTextForRect(rect);
         state.selectedAOIs.push({
@@ -4050,7 +4065,10 @@ window.addEventListener('mouseup', async (e) => {
           return;
         } else {
           const hRect = state.hoveredAoi.rect;
+          state.croppingAoiRect = hRect;
+          redrawScrimCanvas();
           const crop = await api.cropAOI(hRect);
+          state.croppingAoiRect = null;
           if (crop) {
             const containedText = (crop.ocrText && crop.ocrText.trim()) || fetchContainedOcrTextForRect(hRect);
             state.selectedAOIs.push({
