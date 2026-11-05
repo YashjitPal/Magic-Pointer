@@ -1275,7 +1275,18 @@ namespace MagicCursorNative
         }
 
         const int SW_RESTORE = 9;
+        const int SW_SHOW = 5;
         const uint SWP_NOZORDER = 0x0004;
+        const uint SWP_NOSIZE = 0x0001;
+        const uint SWP_NOMOVE = 0x0002;
+        static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
+        const uint PW_RENDERFULLCONTENT = 0x00000002;
+
+        [DllImport("user32.dll")]
+        static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
+
+        [DllImport("user32.dll")]
+        static extern bool SetCursorPos(int X, int Y);
 
         static IntPtr FindAiDesktopAppWindow(string targetApp)
         {
@@ -1613,7 +1624,8 @@ namespace MagicCursorNative
                 Rectangle screenBounds = Screen.PrimaryScreen.Bounds;
                 Rectangle comp = GetCompanionWindowBounds();
 
-                // 1. Bring to foreground first so any F11 / WM_SYSCOMMAND / SetWindowPlacement applies cleanly
+                // 1. Bring to foreground first so any F11 / WM_SYSCOMMAND / SetWindowPos applies cleanly.
+                //    Pulse VK_MENU (Alt) so Windows grants our background helper thread foreground activation rights!
                 uint dummyPid;
                 uint fgThread = GetWindowThreadProcessId(GetForegroundWindow(), out dummyPid);
                 uint appThread = GetWindowThreadProcessId(appHwnd, out dummyPid);
@@ -1621,6 +1633,9 @@ namespace MagicCursorNative
 
                 if (fgThread != 0 && fgThread != curThread) AttachThreadInput(curThread, fgThread, true);
                 if (appThread != 0 && appThread != curThread) AttachThreadInput(curThread, appThread, true);
+
+                keybd_event(VK_MENU, 0, 0, UIntPtr.Zero);
+                keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
 
                 // 2. If the window is in F11 Chromium/Electron FullScreen mode (covering the entire monitor
                 //    including the taskbar and lacking WS_THICKFRAME or having WS_POPUP), toggle F11 off
@@ -1654,23 +1669,14 @@ namespace MagicCursorNative
                 {
                     SendMessage(appHwnd, WM_SYSCOMMAND, new IntPtr(SC_RESTORE), IntPtr.Zero);
                     ShowWindow(appHwnd, SW_RESTORE);
-                    Thread.Sleep(15);
+                    Thread.Sleep(25);
                 }
 
-                // 4. Update `WINDOWPLACEMENT.rcNormalPosition` AND call `SetWindowPos`
-                WINDOWPLACEMENT wp = new WINDOWPLACEMENT();
-                wp.length = Marshal.SizeOf(typeof(WINDOWPLACEMENT));
-                if (GetWindowPlacement(appHwnd, ref wp))
-                {
-                    wp.showCmd = SW_RESTORE;
-                    wp.rcNormalPosition.Left = comp.Left;
-                    wp.rcNormalPosition.Top = comp.Top;
-                    wp.rcNormalPosition.Right = comp.Right;
-                    wp.rcNormalPosition.Bottom = comp.Bottom;
-                    SetWindowPlacement(appHwnd, ref wp);
-                }
-
-                SetWindowPos(appHwnd, IntPtr.Zero, comp.X, comp.Y, comp.Width, comp.Height, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_FRAMECHANGED);
+                // 4. Promote Z-order to the very top of non-topmost windows (`HWND_TOPMOST` -> `HWND_NOTOPMOST`)
+                //    and resize via `SetWindowPos` WITHOUT pre-calling `SetWindowPlacement` (so Electron's BaseWindow
+                //    always fires its `resize` event and resizes its inner `WebContentsView` to match!).
+                SetWindowPos(appHwnd, HWND_TOPMOST, comp.X, comp.Y, comp.Width, comp.Height, SWP_SHOWWINDOW | SWP_FRAMECHANGED);
+                SetWindowPos(appHwnd, HWND_NOTOPMOST, comp.X, comp.Y, comp.Width, comp.Height, SWP_SHOWWINDOW | SWP_FRAMECHANGED);
 
                 SetForegroundWindow(appHwnd);
                 BringWindowToTop(appHwnd);
@@ -1734,13 +1740,67 @@ namespace MagicCursorNative
             return false;
         }
 
+        static bool IsComposerHydrated(IntPtr appHwnd)
+        {
+            if (appHwnd == IntPtr.Zero) return false;
+            try
+            {
+                RECT r;
+                if (!GetWindowRect(appHwnd, out r)) return false;
+                int w = r.Right - r.Left;
+                int h = r.Bottom - r.Top;
+                if (w < 250 || h < 250) return false;
+
+                using (Bitmap bmp = new Bitmap(w, h))
+                {
+                    using (Graphics g = Graphics.FromImage(bmp))
+                    {
+                        IntPtr hdc = g.GetHdc();
+                        PrintWindow(appHwnd, hdc, PW_RENDERFULLCONTENT);
+                        g.ReleaseHdc(hdc);
+                    }
+
+                    // Sample the center of the window (background) vs the composer input bar region (`h - 102`, `h - 90`, `h - 52`).
+                    // During cold-launch splash/skeleton screens, the entire window is a uniform solid dark color (#000000, #151515, or #191919).
+                    // Once the React/Web composer UI mounts, the composer card/pill and its action icons have distinct luminance/contrast!
+                    Color bg = bmp.GetPixel(w / 2, h / 2);
+                    int[] checkYs = new int[]
+                    {
+                        Math.Max(10, h - (int)Math.Round(h * 0.11)),
+                        Math.Max(10, h - (int)Math.Round(h * 0.09)),
+                        Math.Max(10, h - (int)Math.Round(h * 0.055))
+                    };
+                    int distinctPoints = 0;
+                    foreach (int cy in checkYs)
+                    {
+                        for (int xPct = 15; xPct <= 85; xPct += 10)
+                        {
+                            int cx = Math.Max(4, Math.Min(w - 4, (w * xPct) / 100));
+                            Color c = bmp.GetPixel(cx, cy);
+                            int diff = Math.Abs(c.R - bg.R) + Math.Abs(c.G - bg.G) + Math.Abs(c.B - bg.B);
+                            if (diff >= 18)
+                            {
+                                distinctPoints++;
+                            }
+                        }
+                    }
+                    return distinctPoints >= 2;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         static void ClickAndFocusComposerInput(IntPtr appHwnd, string targetApp)
         {
             if (appHwnd == IntPtr.Zero) return;
             try
             {
-                // 1. Force foreground focus with AttachThreadInput so the target app's window
-                //    and inner WebContentsView are guaranteed to be the active keyboard receiver
+                string app = (targetApp ?? "gemini").Trim().ToLowerInvariant();
+                // 1. Force foreground focus with VK_MENU + AttachThreadInput + HWND_TOPMOST promotion so the target app's
+                //    window and inner WebContentsView are guaranteed to be on top of all windows and receive keyboard/mouse input!
                 uint dummyPid;
                 uint fgThread = GetWindowThreadProcessId(GetForegroundWindow(), out dummyPid);
                 uint appThread = GetWindowThreadProcessId(appHwnd, out dummyPid);
@@ -1749,16 +1809,21 @@ namespace MagicCursorNative
                 if (fgThread != 0 && fgThread != curThread) AttachThreadInput(curThread, fgThread, true);
                 if (appThread != 0 && appThread != curThread) AttachThreadInput(curThread, appThread, true);
 
+                keybd_event(VK_MENU, 0, 0, UIntPtr.Zero);
+                keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                ShowWindow(appHwnd, SW_SHOW);
+                SetWindowPos(appHwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+                SetWindowPos(appHwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
                 SetForegroundWindow(appHwnd);
                 BringWindowToTop(appHwnd);
 
                 if (appThread != 0 && appThread != curThread) AttachThreadInput(curThread, appThread, false);
                 if (fgThread != 0 && fgThread != curThread) AttachThreadInput(curThread, fgThread, false);
 
-                // 2. Click inside the prompt composer area in the bottom-center of the companion window.
-                //    Wait 60ms after SetWindowPos before clicking so Chromium's WebContentsView has finished
+                // 2. Click directly inside the prompt composer text area of the companion window.
+                //    Wait 65ms after SetWindowPos before clicking so Chromium's WebContentsView has finished
                 //    reflowing to the new companion dimensions!
-                Thread.Sleep(60);
+                Thread.Sleep(65);
                 RECT r;
                 if (GetWindowRect(appHwnd, out r))
                 {
@@ -1769,16 +1834,58 @@ namespace MagicCursorNative
                         POINT origPt;
                         GetCursorPos(out origPt);
 
-                        int clickX = r.Left + (w / 2);
-                        int clickY = r.Bottom - Math.Max(78, (int)Math.Round(h * 0.11));
-                        Cursor.Position = new System.Drawing.Point(clickX, clickY);
+                        // In ChatGPT / Codex Desktop, the "Do anything" textarea is on the upper-left/center of the composer card
+                        // (`x = Left + 35% width`, `y = Bottom - 102px`). In Gemini and Claude, `x = Left + 42% width`, `y = Bottom - 10.5% height`.
+                        int clickX = (app == "chatgpt")
+                            ? (r.Left + (int)Math.Round(w * 0.35))
+                            : (r.Left + (int)Math.Round(w * 0.42));
+                        int clickY = r.Bottom - Math.Max(82, (int)Math.Round(h * 0.106));
+
+                        // Use Win32 `SetCursorPos` (strict physical screen pixels) instead of `System.Windows.Forms.Cursor.Position`
+                        // so 125%/150% High-DPI displays never double-scale the click coordinates off-screen!
+                        SetCursorPos(clickX, clickY);
+                        Thread.Sleep(18);
+                        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+                        Thread.Sleep(14);
+                        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+                        Thread.Sleep(35);
+
+                        SetCursorPos(origPt.X, origPt.Y);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        static void ClickSubmitButtonFallback(IntPtr appHwnd, string targetApp)
+        {
+            if (appHwnd == IntPtr.Zero) return;
+            string app = (targetApp ?? "gemini").Trim().ToLowerInvariant();
+            if (app != "chatgpt") return;
+            try
+            {
+                RECT r;
+                if (GetWindowRect(appHwnd, out r))
+                {
+                    int w = r.Right - r.Left;
+                    int h = r.Bottom - r.Top;
+                    if (w > 200 && h > 200)
+                    {
+                        POINT origPt;
+                        GetCursorPos(out origPt);
+
+                        // In ChatGPT Desktop's 600x958 companion layout, the circular Up-Arrow Send button
+                        // sits at `(Right - 60, Bottom - 48)` in physical pixels (`x = 90% width`, `y = Bottom - 5% height`).
+                        int sendX = r.Right - (int)Math.Round(w * 0.10);
+                        int sendY = r.Bottom - Math.Max(42, (int)Math.Round(h * 0.05));
+                        SetCursorPos(sendX, sendY);
                         Thread.Sleep(15);
                         mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
                         Thread.Sleep(12);
                         mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
-                        Thread.Sleep(25);
+                        Thread.Sleep(20);
 
-                        Cursor.Position = new System.Drawing.Point(origPt.X, origPt.Y);
+                        SetCursorPos(origPt.X, origPt.Y);
                     }
                 }
             }
@@ -1802,7 +1909,25 @@ namespace MagicCursorNative
             if (appHwnd != IntPtr.Zero)
             {
                 ResizeAndFocusCompanionWindow(appHwnd);
-                Thread.Sleep(25);
+                Thread.Sleep(40);
+                // If an already-open app (such as Gemini Desktop after 4 hours idle `Va = 14400s`, or a recently
+                // launched window) triggers an internal `reloadIgnoringCache()` when focused, wait until its
+                // composer UI finishes rendering before pasting!
+                if (!IsComposerHydrated(appHwnd))
+                {
+                    Stopwatch warmSw = Stopwatch.StartNew();
+                    while (warmSw.ElapsedMilliseconds < 4000)
+                    {
+                        Thread.Sleep(180);
+                        if (IsComposerHydrated(appHwnd))
+                        {
+                            Thread.Sleep(150);
+                            break;
+                        }
+                    }
+                    ResizeAndFocusCompanionWindow(appHwnd);
+                    Thread.Sleep(50);
+                }
                 return appHwnd;
             }
 
@@ -1837,7 +1962,7 @@ namespace MagicCursorNative
                 SendWinShiftG();
             }
 
-            for (int i = 0; i < 100; i++)
+            for (int i = 0; i < 120; i++)
             {
                 Thread.Sleep(50);
                 appHwnd = FindAiDesktopAppWindow(app);
@@ -1845,13 +1970,24 @@ namespace MagicCursorNative
                 {
                     ResizeAndFocusCompanionWindow(appHwnd);
                     // When an Electron app (especially ChatGPT's 674MB app.asar or Claude/Gemini) cold-launches,
-                    // its native HWND (`Chrome_WidgetWin_1`) becomes visible ~1.2–1.6s BEFORE its React/Web composer
-                    // finishes hydrating inside the renderer! Wait for the web composer UI to finish mounting
-                    // on cold launch so the prompt and attachments are never pasted into the blank splash screen!
-                    int coldHydrationWaitMs = (app == "chatgpt") ? 1850 : (app == "claude") ? 1400 : 1200;
-                    Thread.Sleep(coldHydrationWaitMs);
+                    // its native HWND (`Chrome_WidgetWin_1`) becomes visible ~1.2–3.5s BEFORE its React/Web composer
+                    // finishes hydrating inside the renderer! Poll `IsComposerHydrated(appHwnd)` up to 5.5s
+                    // (after a minimum initial settle wait) so we paste as soon as the composer box is actually mounted!
+                    int minWaitMs = (app == "chatgpt") ? 900 : (app == "claude") ? 700 : 600;
+                    int maxWaitMs = (app == "chatgpt") ? 5500 : (app == "claude") ? 4500 : 4000;
+                    Stopwatch hydSw = Stopwatch.StartNew();
+                    Thread.Sleep(minWaitMs);
+                    while (hydSw.ElapsedMilliseconds < maxWaitMs)
+                    {
+                        if (IsComposerHydrated(appHwnd))
+                        {
+                            Thread.Sleep(180);
+                            break;
+                        }
+                        Thread.Sleep(180);
+                    }
                     ResizeAndFocusCompanionWindow(appHwnd);
-                    Thread.Sleep(80);
+                    Thread.Sleep(90);
                     return appHwnd;
                 }
             }
@@ -1862,13 +1998,15 @@ namespace MagicCursorNative
         static IntPtr OpenAndPositionAiDesktopApp(string preferredApp)
         {
             bool dummyCold;
-            return OpenAndPositionAiDesktopApp(preferredApp, out dummyCold);
+            string dummyResolved;
+            return OpenAndPositionAiDesktopApp(preferredApp, out dummyCold, out dummyResolved);
         }
 
-        static IntPtr OpenAndPositionAiDesktopApp(string preferredApp, out bool wasColdLaunched)
+        static IntPtr OpenAndPositionAiDesktopApp(string preferredApp, out bool wasColdLaunched, out string resolvedApp)
         {
             wasColdLaunched = false;
             string pref = (preferredApp ?? "gemini").Trim().ToLowerInvariant();
+            resolvedApp = pref;
             // Build fallback order: preferred -> gemini -> claude -> chatgpt
             List<string> order = new List<string>();
             order.Add(pref);
@@ -1881,6 +2019,7 @@ namespace MagicCursorNative
                 IntPtr hwnd = OpenAndPositionSingleAiApp(candidate, out wasColdLaunched);
                 if (hwnd != IntPtr.Zero)
                 {
+                    resolvedApp = candidate;
                     return hwnd;
                 }
             }
@@ -1921,33 +2060,25 @@ namespace MagicCursorNative
             }
 
             bool wasColdLaunched = false;
-            IntPtr aiHwnd = OpenAndPositionAiDesktopApp(targetApp, out wasColdLaunched);
+            string resolvedApp = targetApp;
+            IntPtr aiHwnd = OpenAndPositionAiDesktopApp(targetApp, out wasColdLaunched, out resolvedApp);
             if (aiHwnd == IntPtr.Zero) return;
-
-            // Focus the composer input after resizing and clear any leftover draft text inside the target app's input box!
-            ClickAndFocusComposerInput(aiHwnd, targetApp);
-            if (!wasColdLaunched)
-            {
-                SendSelectAllAndClearComposer();
-            }
 
             bool hasAttachments = (imageFiles.Count > 0 || otherFiles.Count > 0);
             List<string> allAttachmentFiles = new List<string>();
             allAttachmentFiles.AddRange(imageFiles);
             allAttachmentFiles.AddRange(otherFiles);
 
-            // IMPORTANT: Paste the text prompt FIRST while the composer textarea is 100% focused and clean
-            // (before pasting images, which in Gemini/Claude can shift DOM focus onto the attachment preview chip!).
-            if (!string.IsNullOrWhiteSpace(prompt))
-            {
-                SetClipboardTextRetry(prompt);
-                Thread.Sleep(35);
-                SendCtrlV();
-                // Wait 140ms so the target app's renderer finishes reading the text from the clipboard
-                // before we put the image/files onto the clipboard!
-                Thread.Sleep(140);
-            }
+            // Focus the composer input after resizing and clear any leftover draft text inside the target app's input box!
+            ClickAndFocusComposerInput(aiHwnd, resolvedApp);
+            SendSelectAllAndClearComposer();
 
+            // IMPORTANT:
+            // - When sending BOTH attachments AND a text prompt, paste the attachments FIRST and the text prompt LAST!
+            //   Why? Because pasting an image or file into Gemini/Claude/ChatGPT shifts DOM focus onto the attachment
+            //   preview chip, so pressing `Enter` while the chip is focused fails to submit! By clicking the composer
+            //   input again and pasting the text prompt LAST, the cursor is guaranteed to sit inside the text box
+            //   when `Enter` is pressed!
             if (allAttachmentFiles.Count > 0)
             {
                 try
@@ -1958,35 +2089,59 @@ namespace MagicCursorNative
                         {
                             SetClipboardImageRetry(img);
                         }
-                        Thread.Sleep(35);
+                        Thread.Sleep(45);
                         SendCtrlV();
-                        Thread.Sleep(320);
+                        Thread.Sleep(360);
                     }
                     else
                     {
                         StringCollection sc = new StringCollection();
                         foreach (string fp in allAttachmentFiles) sc.Add(fp);
                         SetClipboardFileDropListRetry(sc);
-                        Thread.Sleep(35);
+                        Thread.Sleep(45);
                         SendCtrlV();
-                        Thread.Sleep(340);
+                        Thread.Sleep(380);
                     }
                 }
                 catch { }
+
+                // Re-focus the composer text area after attachment paste so the text prompt and Enter key land inside the input!
+                ClickAndFocusComposerInput(aiHwnd, resolvedApp);
             }
 
-            // Ensure the composer has focus and press Enter to submit!
+            if (!string.IsNullOrWhiteSpace(prompt))
+            {
+                SetClipboardTextRetry(prompt);
+                Thread.Sleep(45);
+                // Verify target app still holds foreground focus right before Ctrl+V
+                if (GetForegroundWindow() != aiHwnd)
+                {
+                    ClickAndFocusComposerInput(aiHwnd, resolvedApp);
+                }
+                SendCtrlV();
+                // Wait 180ms so the target app's React/ProseMirror composer state updates and enables its Submit handler!
+                Thread.Sleep(180);
+            }
+
+            // Submit the prompt / attachments!
             if (hasAttachments)
             {
-                ClickAndFocusComposerInput(aiHwnd, targetApp);
                 SendEnterKey();
-                // Follow-up Enter in case the image upload spinner was still active on the first Enter
-                Thread.Sleep(550);
+                // Image upload to Gemini/Claude/ChatGPT takes ~0.5s to ~1.4s while the spinner is active
+                // on the attachment thumbnail (during which pressing Enter is ignored). Fire follow-up Enter
+                // keys at +650ms and +1350ms so the prompt submits immediately once the upload spinner finishes!
+                Thread.Sleep(650);
                 SendEnterKey();
+                Thread.Sleep(700);
+                SendEnterKey();
+                Thread.Sleep(80);
+                ClickSubmitButtonFallback(aiHwnd, resolvedApp);
             }
             else if (!string.IsNullOrWhiteSpace(prompt))
             {
                 SendEnterKey();
+                Thread.Sleep(90);
+                ClickSubmitButtonFallback(aiHwnd, resolvedApp);
             }
         }
     }
