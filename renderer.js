@@ -1094,8 +1094,8 @@ function processOcrResultIntoTextAOIs(ocrData) {
   // - ALIGNMENT_TOLERANCE = 0.05f
   // - VERT_GAP_LIMIT = 1.5f
   // Note: On Windows, WinRT OcrEngine sometimes splits inline [brackets] / code tags into a separate OcrLine
-  // on the same row, or strips leading bullet glyphs ('o', '•') from the first line of a bulleted item.
-  // First, pre-merge any split line fragments that sit on the SAME horizontal row!
+  // on the same row. First, pre-merge any split line fragments that sit on the SAME horizontal row AND within
+  // LineSplitRule's 4.0 * avgCharWidth horizontal threshold (so sidebar items NEVER merge across columns into main content!).
   rawLines.sort((a, b) => a.boundingBox.top - b.boundingBox.top || a.boundingBox.left - b.boundingBox.left);
   const mergedRowLines = [];
   for (const line of rawLines) {
@@ -1110,11 +1110,14 @@ function processOcrResultIntoTextAOIs(ocrData) {
       const vOverlap = Math.min(pb.bottom, lb.bottom) - Math.max(pb.top, lb.top);
       const centerYDiff = Math.abs((pb.top + pb.bottom) * 0.5 - (lb.top + lb.bottom) * 0.5);
       const hGap = lb.left >= pb.right ? lb.left - pb.right : pb.left - lb.right;
+      // LineSplitRule.java:287: threshold = 4.0f * avgCharDim (approx 1.8 * lineHeight).
+      // Never merge across a column gap wider than 1.8 * minH (e.g. sidebar -> article column)!
+      const maxSameRowGap = Math.min(36, minH * 1.8);
       if (
-        minH / Math.max(1, maxH) >= 0.45 &&
-        (vOverlap >= minH * 0.4 || centerYDiff <= maxH * 0.45) &&
-        hGap >= -maxH &&
-        hGap <= maxH * 4.5
+        minH / Math.max(1, maxH) >= 0.6 &&
+        (vOverlap >= minH * 0.45 || centerYDiff <= maxH * 0.35) &&
+        hGap >= -minH * 0.5 &&
+        hGap <= maxSameRowGap
       ) {
         const combinedElems = [...prev.elements, ...line.elements].sort(
           (a, b) => a.boundingBox.left - b.boundingBox.left
@@ -1138,14 +1141,12 @@ function processOcrResultIntoTextAOIs(ocrData) {
     }
   }
 
-  const ALIGNMENT_HEIGHT_RATIO = 0.5;
+  const ALIGNMENT_HEIGHT_RATIO = 0.55;
   const OVERLAP_THRESHOLD = 0.1;
   const ALIGNMENT_TOLERANCE = 0.05;
-  const VERT_GAP_LIMIT = 1.65;
+  const VERT_GAP_LIMIT = 1.45;
 
   let activeGroups = mergedRowLines.map((line, idx) => {
-    // Compute true average character/word height (instead of union box height) so multi-line groups
-    // continue merging all lines of a paragraph!
     const wordHeights = (line.elements || []).map((e) => e.boundingBox.height).filter((h) => h > 0);
     const avgWordH = wordHeights.length
       ? wordHeights.reduce((a, b) => a + b, 0) / wordHeights.length
@@ -1162,6 +1163,7 @@ function processOcrResultIntoTextAOIs(ocrData) {
   function canMergePairwise(g1, g2) {
     const h1 = g1.meanCharHeight;
     const h2 = g2.meanCharHeight;
+    // Prevent merging a larger heading (e.g. "3. The Brain...") with smaller body text
     if (Math.min(h1, h2) / Math.max(h1, h2) < ALIGNMENT_HEIGHT_RATIO) return false;
     const r1 = g1.rect;
     const r2 = g2.rect;
@@ -1173,10 +1175,11 @@ function processOcrResultIntoTextAOIs(ocrData) {
       leftDiff,
       Math.min(Math.round(Math.abs(centerX1 - centerX2)), Math.abs(r1.right - r2.right))
     );
-    // Allow either Google's 5% width tolerance OR up to 2.2x character height for bullet/hanging indent
-    const maxAllowedAlignDiff = Math.max(
-      Math.max(r1.width, r2.width) * ALIGNMENT_TOLERANCE,
-      Math.max(h1, h2) * 2.2
+    // Allow Google's 5% width tolerance OR up to 28px for a bullet point ('•' / 'o') indent,
+    // but NEVER across different layout columns (leftDiff must be <= 32px if left-aligned)!
+    const maxAllowedAlignDiff = Math.min(
+      32,
+      Math.max(Math.max(r1.width, r2.width) * ALIGNMENT_TOLERANCE, Math.max(h1, h2) * 1.8)
     );
     if (xAlignDiff > maxAllowedAlignDiff) return false;
     const gapY = Math.max(0, Math.max(r1.top, r2.top) - Math.min(r1.bottom, r2.bottom));

@@ -347,6 +347,11 @@ function runSegmenterOnBitmap(bitmap, modelType) {
         const ry = Math.round(box.originY);
         const rw = Math.round(box.width);
         const rh = Math.round(box.height);
+        // Filter out extreme horizontal banner strips (width > 8x height and height < 90px)
+        // where MobileRaid misclassifies a wide single line of text across two columns as an INTERACTABLE strip
+        if (modelType === 'SCREEN_ELEMENT' && aoiCategory === 'INTERACTABLE' && rh < 90 && rw > rh * 8.5) {
+          continue;
+        }
         rawAois.push({
           x: rx,
           y: ry,
