@@ -1280,7 +1280,8 @@ namespace MagicCursorNative
         static IntPtr FindAiDesktopAppWindow(string targetApp)
         {
             string app = (targetApp ?? "gemini").Trim().ToLowerInvariant();
-            IntPtr foundExact = IntPtr.Zero;
+            IntPtr foundVisibleNormal = IntPtr.Zero;
+            IntPtr foundVisibleIconic = IntPtr.Zero;
             EnumWindows((hWnd, lParam) =>
             {
                 if (!IsWindowVisible(hWnd)) return true;
@@ -1290,6 +1291,16 @@ namespace MagicCursorNative
                 if (string.IsNullOrEmpty(title)) return true;
                 if (title.IndexOf("Magic Pointer", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     title.IndexOf("Magic Cursor", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+
+                StringBuilder clsSb = new StringBuilder(128);
+                GetClassName(hWnd, clsSb, 128);
+                string cls = clsSb.ToString();
+                // Ignore hidden 0x0 helper/IME/tray/crashpad windows (`Chrome_WidgetWin_0`, `NotifyIconHostWindow`, etc.);
+                // actual Chromium/Electron application windows use `Chrome_WidgetWin_1`!
+                if (!cls.Equals("Chrome_WidgetWin_1", StringComparison.OrdinalIgnoreCase))
                 {
                     return true;
                 }
@@ -1309,41 +1320,43 @@ namespace MagicCursorNative
                     catch { }
                 }
 
-                // Strictly match the actual process executable name of the target AI Desktop App
-                // so IDEs / browsers / other apps (like Antigravity, Cursor, VS Code, Chrome, etc.)
-                // that happen to have "Gemini", "Claude", or "ChatGPT" in their window title are NEVER matched!
+                bool matchesApp = false;
                 if (app == "claude")
                 {
-                    if (procName.Equals("claude", StringComparison.OrdinalIgnoreCase) ||
+                    matchesApp =
+                        procName.Equals("claude", StringComparison.OrdinalIgnoreCase) ||
                         procName.Equals("claude-desktop", StringComparison.OrdinalIgnoreCase) ||
-                        procName.Equals("AnthropicClaude", StringComparison.OrdinalIgnoreCase))
-                    {
-                        foundExact = hWnd;
-                        return false;
-                    }
+                        procName.Equals("AnthropicClaude", StringComparison.OrdinalIgnoreCase);
                 }
                 else if (app == "chatgpt")
                 {
-                    if (procName.Equals("ChatGPT", StringComparison.OrdinalIgnoreCase) ||
+                    matchesApp =
+                        procName.Equals("ChatGPT", StringComparison.OrdinalIgnoreCase) ||
                         procName.Equals("chatgpt-desktop", StringComparison.OrdinalIgnoreCase) ||
-                        procName.Equals("Codex", StringComparison.OrdinalIgnoreCase))
-                    {
-                        foundExact = hWnd;
-                        return false;
-                    }
+                        procName.Equals("Codex", StringComparison.OrdinalIgnoreCase);
                 }
                 else
                 {
-                    if (procName.Equals("Gemini", StringComparison.OrdinalIgnoreCase) ||
-                        procName.Equals("GoogleGemini", StringComparison.OrdinalIgnoreCase))
+                    matchesApp =
+                        procName.Equals("Gemini", StringComparison.OrdinalIgnoreCase) ||
+                        procName.Equals("GoogleGemini", StringComparison.OrdinalIgnoreCase);
+                }
+
+                if (matchesApp)
+                {
+                    if (!IsIconic(hWnd))
                     {
-                        foundExact = hWnd;
+                        foundVisibleNormal = hWnd;
                         return false;
+                    }
+                    else if (foundVisibleIconic == IntPtr.Zero)
+                    {
+                        foundVisibleIconic = hWnd;
                     }
                 }
                 return true;
             }, IntPtr.Zero);
-            return foundExact;
+            return foundVisibleNormal != IntPtr.Zero ? foundVisibleNormal : foundVisibleIconic;
         }
 
         static void SendWinShiftG()
@@ -1772,8 +1785,9 @@ namespace MagicCursorNative
             catch { }
         }
 
-        static IntPtr OpenAndPositionSingleAiApp(string appId)
+        static IntPtr OpenAndPositionSingleAiApp(string appId, out bool wasColdLaunched)
         {
+            wasColdLaunched = false;
             string app = (appId ?? "gemini").Trim().ToLowerInvariant();
             if (app == "chatgpt")
             {
@@ -1816,21 +1830,28 @@ namespace MagicCursorNative
                 }
             }
 
+            wasColdLaunched = true;
             bool launchedExe = TryLaunchAiDesktopAppExecutable(app);
             if (!launchedExe && app == "gemini")
             {
                 SendWinShiftG();
             }
 
-            for (int i = 0; i < 90; i++)
+            for (int i = 0; i < 100; i++)
             {
-                Thread.Sleep(45);
+                Thread.Sleep(50);
                 appHwnd = FindAiDesktopAppWindow(app);
                 if (appHwnd != IntPtr.Zero)
                 {
                     ResizeAndFocusCompanionWindow(appHwnd);
-                    Thread.Sleep(450);
+                    // When an Electron app (especially ChatGPT's 674MB app.asar or Claude/Gemini) cold-launches,
+                    // its native HWND (`Chrome_WidgetWin_1`) becomes visible ~1.2–1.6s BEFORE its React/Web composer
+                    // finishes hydrating inside the renderer! Wait for the web composer UI to finish mounting
+                    // on cold launch so the prompt and attachments are never pasted into the blank splash screen!
+                    int coldHydrationWaitMs = (app == "chatgpt") ? 1850 : (app == "claude") ? 1400 : 1200;
+                    Thread.Sleep(coldHydrationWaitMs);
                     ResizeAndFocusCompanionWindow(appHwnd);
+                    Thread.Sleep(80);
                     return appHwnd;
                 }
             }
@@ -1840,6 +1861,13 @@ namespace MagicCursorNative
 
         static IntPtr OpenAndPositionAiDesktopApp(string preferredApp)
         {
+            bool dummyCold;
+            return OpenAndPositionAiDesktopApp(preferredApp, out dummyCold);
+        }
+
+        static IntPtr OpenAndPositionAiDesktopApp(string preferredApp, out bool wasColdLaunched)
+        {
+            wasColdLaunched = false;
             string pref = (preferredApp ?? "gemini").Trim().ToLowerInvariant();
             // Build fallback order: preferred -> gemini -> claude -> chatgpt
             List<string> order = new List<string>();
@@ -1850,7 +1878,7 @@ namespace MagicCursorNative
 
             foreach (string candidate in order)
             {
-                IntPtr hwnd = OpenAndPositionSingleAiApp(candidate);
+                IntPtr hwnd = OpenAndPositionSingleAiApp(candidate, out wasColdLaunched);
                 if (hwnd != IntPtr.Zero)
                 {
                     return hwnd;
@@ -1892,12 +1920,16 @@ namespace MagicCursorNative
                 }
             }
 
-            IntPtr aiHwnd = OpenAndPositionAiDesktopApp(targetApp);
+            bool wasColdLaunched = false;
+            IntPtr aiHwnd = OpenAndPositionAiDesktopApp(targetApp, out wasColdLaunched);
             if (aiHwnd == IntPtr.Zero) return;
 
             // Focus the composer input after resizing and clear any leftover draft text inside the target app's input box!
             ClickAndFocusComposerInput(aiHwnd, targetApp);
-            SendSelectAllAndClearComposer();
+            if (!wasColdLaunched)
+            {
+                SendSelectAllAndClearComposer();
+            }
 
             bool hasAttachments = (imageFiles.Count > 0 || otherFiles.Count > 0);
             List<string> allAttachmentFiles = new List<string>();
