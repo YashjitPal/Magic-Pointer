@@ -378,11 +378,22 @@ function activateMagicPointer(rawX, rawY, source = 'shake') {
   });
 }
 
-function deactivateMagicPointer() {
+function deactivateMagicPointer(forSend = false) {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
   isMagicPointerActive = false;
   sendWatcherCommand('ACTIVE:0');
   overlayWindow.setIgnoreMouseEvents(true);
+  if (forSend) {
+    // Temporarily hide the alwaysOnTop('screen-saver') overlay window while the native sender
+    // resizes and focuses the target AI Desktop App so the overlay never steals focus or blocks
+    // SetWindowPos / mouse_event / keybd_event!
+    overlayWindow.hide();
+    setTimeout(() => {
+      if (!isMagicPointerActive && overlayWindow && !overlayWindow.isDestroyed()) {
+        overlayWindow.showInactive();
+      }
+    }, 1800);
+  }
   overlayWindow.webContents.send('magic-pointer:deactivate');
 }
 
@@ -790,7 +801,7 @@ ipcMain.handle('magic-pointer:send-to-gemini', async (_event, payload) => {
     return { ok: false, noAppInstalled: true, availability: avail };
   }
 
-  deactivateMagicPointer();
+  deactivateMagicPointer(true);
 
   const resolvedApp = resolveDefaultOrValidTargetApp((payload && payload.targetApp) || targetApp);
   if (resolvedApp !== targetApp) {

@@ -56,6 +56,45 @@ namespace MagicCursorNative
         static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
         [DllImport("user32.dll")]
+        static extern bool IsZoomed(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        static extern bool GetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT lpwndpl);
+
+        [DllImport("user32.dll")]
+        static extern bool SetWindowPlacement(IntPtr hWnd, [In] ref WINDOWPLACEMENT lpwndpl);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+        const int GWL_STYLE = -16;
+        const int WS_POPUP = unchecked((int)0x80000000);
+        const int WS_THICKFRAME = 0x00040000;
+        const int WS_MAXIMIZE = 0x01000000;
+        const int WS_MINIMIZE = 0x20000000;
+        const uint WM_SYSCOMMAND = 0x0112;
+        const int SC_RESTORE = 0xF120;
+        const uint SWP_FRAMECHANGED = 0x0020;
+        const byte VK_F11 = 0x7A;
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct WINDOWPLACEMENT
+        {
+            public int length;
+            public int flags;
+            public int showCmd;
+            public POINT ptMinPosition;
+            public POINT ptMaxPosition;
+            public RECT rcNormalPosition;
+        }
+
+        [DllImport("user32.dll")]
         static extern bool EnumWindows(EnumWindowsProc enumProc, IntPtr lParam);
 
         delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
@@ -1517,30 +1556,62 @@ namespace MagicCursorNative
             return false;
         }
 
+        static Rectangle GetCompanionWindowBounds()
+        {
+            Rectangle workArea = Screen.PrimaryScreen.WorkingArea;
+            int margin = Math.Max(16, (int)Math.Round(workArea.Width * 0.012));
+            int targetW = Math.Max(460, Math.Min(560, (int)Math.Round(workArea.Width * 0.29)));
+            int targetH = Math.Max(640, Math.Min(workArea.Height - margin * 2, (int)Math.Round(workArea.Height * 0.84)));
+            int targetX = workArea.Right - targetW - margin;
+            int targetY = workArea.Top + Math.Max(margin, (workArea.Height - targetH) / 2);
+            return new Rectangle(targetX, targetY, targetW, targetH);
+        }
+
+        // Pre-seed `%APPDATA%\gemini\settings.json` with the Magic Pointer companion window bounds
+        // so if the Gemini Desktop App is cold-launched or un-minimized, its own `windowBounds`
+        // restoration logic (`Ta()` / `ct()` in `app.asar`) uses the exact companion dimensions
+        // instead of snapping back to the user's previous full-screen / 1200x900 dimensions!
+        static void SyncGeminiSettingsWindowBoundsToCompanion()
+        {
+            try
+            {
+                string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+                string settingsPath = Path.Combine(appData, "gemini", "settings.json");
+                if (!File.Exists(settingsPath)) return;
+
+                Rectangle workArea = Screen.PrimaryScreen.WorkingArea;
+                Rectangle comp = GetCompanionWindowBounds();
+                int relX = comp.X - workArea.X;
+                int relY = comp.Y - workArea.Y;
+
+                string raw = File.ReadAllText(settingsPath, Encoding.UTF8);
+                string updated = raw;
+                updated = Regex.Replace(updated, "(\"windowBounds\"\\s*:\\s*\\{[^}]*?\"width\"\\s*:\\s*)\\d+", "${1}" + comp.Width);
+                updated = Regex.Replace(updated, "(\"windowBounds\"\\s*:\\s*\\{[^}]*?\"height\"\\s*:\\s*)\\d+", "${1}" + comp.Height);
+                updated = Regex.Replace(updated, "(\"windowBounds\"\\s*:\\s*\\{[^}]*?\"relativeX\"\\s*:\\s*)-?\\d+", "${1}" + relX);
+                updated = Regex.Replace(updated, "(\"windowBounds\"\\s*:\\s*\\{[^}]*?\"relativeY\"\\s*:\\s*)-?\\d+", "${1}" + relY);
+
+                if (updated != raw)
+                {
+                    File.WriteAllText(settingsPath, updated, Encoding.UTF8);
+                }
+            }
+            catch { }
+        }
+
         // Exact port of Googlebook RobinKit non-fullscreen companion window behavior
         // (`TextQuery.shouldUseFullScreenMode = false` in `RobinKitServiceGrpcClientImpl.java:455-516`):
-        // Un-maximizes the target AI Desktop App (`SW_RESTORE`) and resizes/docks it into a floating companion
-        // window on the right side of the work area so it doesn't cover the screen content you just pointed at!
+        // Un-maximizes / exits F11 full-screen on the target AI Desktop App and resizes/docks it into
+        // a floating companion window on the right side of the work area every time Magic Pointer sends!
         static void ResizeAndFocusCompanionWindow(IntPtr appHwnd)
         {
             if (appHwnd == IntPtr.Zero) return;
             try
             {
-                // 1. Restore from maximized/minimized state (`SW_RESTORE = 9`) so `SetWindowPos` can resize it out of full screen
-                ShowWindow(appHwnd, SW_RESTORE);
-                Thread.Sleep(50);
+                Rectangle screenBounds = Screen.PrimaryScreen.Bounds;
+                Rectangle comp = GetCompanionWindowBounds();
 
-                // 2. Compute floating companion bounds on the right side of the primary display work area
-                Rectangle workArea = Screen.PrimaryScreen.WorkingArea;
-                int margin = Math.Max(16, (int)Math.Round(workArea.Width * 0.012));
-                int targetW = Math.Max(460, Math.Min(560, (int)Math.Round(workArea.Width * 0.29)));
-                int targetH = Math.Max(640, Math.Min(workArea.Height - margin * 2, (int)Math.Round(workArea.Height * 0.84)));
-                int targetX = workArea.Right - targetW - margin;
-                int targetY = workArea.Top + Math.Max(margin, (workArea.Height - targetH) / 2);
-
-                SetWindowPos(appHwnd, IntPtr.Zero, targetX, targetY, targetW, targetH, SWP_NOZORDER | SWP_SHOWWINDOW);
-
-                // 3. Bring to foreground focus cleanly (attaching to both current foreground thread AND target window thread!)
+                // 1. Bring to foreground first so any F11 / WM_SYSCOMMAND / SetWindowPlacement applies cleanly
                 uint dummyPid;
                 uint fgThread = GetWindowThreadProcessId(GetForegroundWindow(), out dummyPid);
                 uint appThread = GetWindowThreadProcessId(appHwnd, out dummyPid);
@@ -1548,6 +1619,60 @@ namespace MagicCursorNative
 
                 if (fgThread != 0 && fgThread != curThread) AttachThreadInput(curThread, fgThread, true);
                 if (appThread != 0 && appThread != curThread) AttachThreadInput(curThread, appThread, true);
+
+                // 2. If the window is in F11 Chromium/Electron FullScreen mode (covering the entire monitor
+                //    including the taskbar and lacking WS_THICKFRAME or having WS_POPUP), toggle F11 off
+                //    and restore WS_THICKFRAME so Electron's BaseWindow leaves fullscreen!
+                RECT curRect;
+                if (GetWindowRect(appHwnd, out curRect))
+                {
+                    int curW = curRect.Right - curRect.Left;
+                    int curH = curRect.Bottom - curRect.Top;
+                    int style = GetWindowLong(appHwnd, GWL_STYLE);
+                    bool coversFullMonitor = (curW >= screenBounds.Width && curH >= screenBounds.Height);
+                    bool isFramelessFullscreen = coversFullMonitor && !IsZoomed(appHwnd) && ((style & WS_THICKFRAME) == 0 || (style & WS_POPUP) != 0);
+
+                    if (isFramelessFullscreen)
+                    {
+                        SetForegroundWindow(appHwnd);
+                        BringWindowToTop(appHwnd);
+                        Thread.Sleep(30);
+                        keybd_event(VK_F11, 0, 0, UIntPtr.Zero);
+                        Thread.Sleep(20);
+                        keybd_event(VK_F11, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                        Thread.Sleep(120);
+
+                        int newStyle = (style & ~WS_POPUP & ~WS_MAXIMIZE & ~WS_MINIMIZE) | WS_THICKFRAME;
+                        SetWindowLong(appHwnd, GWL_STYLE, newStyle);
+                    }
+                }
+
+                // 3. If maximized (`IsZoomed`) or minimized (`IsIconic`), send `SC_RESTORE` + `ShowWindow(SW_RESTORE)`
+                if (IsZoomed(appHwnd) || IsIconic(appHwnd))
+                {
+                    SendMessage(appHwnd, WM_SYSCOMMAND, new IntPtr(SC_RESTORE), IntPtr.Zero);
+                    ShowWindow(appHwnd, SW_RESTORE);
+                    Thread.Sleep(80);
+                }
+
+                // 4. Update `WINDOWPLACEMENT.rcNormalPosition` AND call `SetWindowPos` twice (with a short delay)
+                //    so even if Electron's `unmaximize` / `restore` listener tries to restore the user's previous
+                //    custom/fullscreen bounds asynchronously, it is overridden with the Magic Pointer companion bounds!
+                WINDOWPLACEMENT wp = new WINDOWPLACEMENT();
+                wp.length = Marshal.SizeOf(typeof(WINDOWPLACEMENT));
+                if (GetWindowPlacement(appHwnd, ref wp))
+                {
+                    wp.showCmd = SW_RESTORE;
+                    wp.rcNormalPosition.Left = comp.Left;
+                    wp.rcNormalPosition.Top = comp.Top;
+                    wp.rcNormalPosition.Right = comp.Right;
+                    wp.rcNormalPosition.Bottom = comp.Bottom;
+                    SetWindowPlacement(appHwnd, ref wp);
+                }
+
+                SetWindowPos(appHwnd, IntPtr.Zero, comp.X, comp.Y, comp.Width, comp.Height, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_FRAMECHANGED);
+                Thread.Sleep(90);
+                SetWindowPos(appHwnd, IntPtr.Zero, comp.X, comp.Y, comp.Width, comp.Height, SWP_NOZORDER | SWP_SHOWWINDOW);
 
                 SetForegroundWindow(appHwnd);
                 BringWindowToTop(appHwnd);
@@ -1604,6 +1729,10 @@ namespace MagicCursorNative
             if (app == "chatgpt")
             {
                 EnsureChatGptDesktopChatModeConfig();
+            }
+            else if (app == "gemini")
+            {
+                SyncGeminiSettingsWindowBoundsToCompanion();
             }
 
             IntPtr appHwnd = FindAiDesktopAppWindow(app);
