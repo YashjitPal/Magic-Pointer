@@ -1361,18 +1361,16 @@ namespace MagicCursorNative
         static void SendCtrlV()
         {
             keybd_event(VK_CONTROL, 0, 0, UIntPtr.Zero);
-            Thread.Sleep(25);
             keybd_event(VK_V, 0, 0, UIntPtr.Zero);
-            Thread.Sleep(25);
+            Thread.Sleep(8);
             keybd_event(VK_V, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-            Thread.Sleep(25);
             keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
         }
 
         static void SendEnterKey()
         {
             keybd_event(VK_RETURN, 0, 0, UIntPtr.Zero);
-            Thread.Sleep(25);
+            Thread.Sleep(8);
             keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
         }
 
@@ -1620,12 +1618,10 @@ namespace MagicCursorNative
                 {
                     SendMessage(appHwnd, WM_SYSCOMMAND, new IntPtr(SC_RESTORE), IntPtr.Zero);
                     ShowWindow(appHwnd, SW_RESTORE);
-                    Thread.Sleep(80);
+                    Thread.Sleep(15);
                 }
 
-                // 4. Update `WINDOWPLACEMENT.rcNormalPosition` AND call `SetWindowPos` twice (with a short delay)
-                //    so even if Electron's `unmaximize` / `restore` listener tries to restore the user's previous
-                //    custom/fullscreen bounds asynchronously, it is overridden with the Magic Pointer companion bounds!
+                // 4. Update `WINDOWPLACEMENT.rcNormalPosition` AND call `SetWindowPos`
                 WINDOWPLACEMENT wp = new WINDOWPLACEMENT();
                 wp.length = Marshal.SizeOf(typeof(WINDOWPLACEMENT));
                 if (GetWindowPlacement(appHwnd, ref wp))
@@ -1639,8 +1635,6 @@ namespace MagicCursorNative
                 }
 
                 SetWindowPos(appHwnd, IntPtr.Zero, comp.X, comp.Y, comp.Width, comp.Height, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_FRAMECHANGED);
-                Thread.Sleep(90);
-                SetWindowPos(appHwnd, IntPtr.Zero, comp.X, comp.Y, comp.Width, comp.Height, SWP_NOZORDER | SWP_SHOWWINDOW);
 
                 SetForegroundWindow(appHwnd);
                 BringWindowToTop(appHwnd);
@@ -1725,12 +1719,7 @@ namespace MagicCursorNative
                 if (appThread != 0 && appThread != curThread) AttachThreadInput(curThread, appThread, false);
                 if (fgThread != 0 && fgThread != curThread) AttachThreadInput(curThread, fgThread, false);
 
-                Thread.Sleep(50);
-
                 // 2. Click inside the prompt composer area in the bottom-center of the companion window.
-                //    Note: In Gemini's initial welcome screen, the composer sits slightly higher (~26% from bottom),
-                //    whereas in an active conversation it sits at the bottom (~10% from bottom).
-                //    Clicking the bottom composer coordinate focuses the WebContentsView and places the caret in the input box!
                 RECT r;
                 if (GetWindowRect(appHwnd, out r))
                 {
@@ -1744,11 +1733,11 @@ namespace MagicCursorNative
                         int clickX = r.Left + (w / 2);
                         int clickY = r.Bottom - Math.Max(76, (int)Math.Round(h * 0.11));
                         Cursor.Position = new System.Drawing.Point(clickX, clickY);
-                        Thread.Sleep(25);
+                        Thread.Sleep(8);
                         mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
-                        Thread.Sleep(20);
+                        Thread.Sleep(6);
                         mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
-                        Thread.Sleep(50);
+                        Thread.Sleep(15);
 
                         Cursor.Position = new System.Drawing.Point(origPt.X, origPt.Y);
                     }
@@ -1773,29 +1762,49 @@ namespace MagicCursorNative
             if (appHwnd != IntPtr.Zero)
             {
                 ResizeAndFocusCompanionWindow(appHwnd);
-                Thread.Sleep(240);
+                Thread.Sleep(25);
                 return appHwnd;
             }
 
-            // Cold launch: the target AI Desktop App is completely closed (or hidden to tray).
-            // Launch it, wait for its window to appear, resize into the companion window,
-            // and give its web UI time to mount the composer input before pasting!
+            // Cold launch or hidden-to-tray wakeup:
+            // For Gemini, if `Gemini.exe` is already running hidden in the background, `Win + Shift + G`
+            // wakes its hidden BaseWindow in ~15ms via its Named Pipe (`SHOW`), whereas spawning a second
+            // `Gemini.exe` process takes ~600ms!
+            if (app == "gemini")
+            {
+                Process[] runningGemini = Process.GetProcessesByName("Gemini");
+                if (runningGemini != null && runningGemini.Length > 0)
+                {
+                    SendWinShiftG();
+                    for (int i = 0; i < 15; i++)
+                    {
+                        Thread.Sleep(25);
+                        appHwnd = FindAiDesktopAppWindow(app);
+                        if (appHwnd != IntPtr.Zero)
+                        {
+                            ResizeAndFocusCompanionWindow(appHwnd);
+                            Thread.Sleep(35);
+                            return appHwnd;
+                        }
+                    }
+                }
+            }
+
             bool launchedExe = TryLaunchAiDesktopAppExecutable(app);
             if (!launchedExe && app == "gemini")
             {
                 SendWinShiftG();
             }
 
-            for (int i = 0; i < 45; i++)
+            for (int i = 0; i < 90; i++)
             {
-                Thread.Sleep(150);
+                Thread.Sleep(45);
                 appHwnd = FindAiDesktopAppWindow(app);
                 if (appHwnd != IntPtr.Zero)
                 {
                     ResizeAndFocusCompanionWindow(appHwnd);
-                    Thread.Sleep(1100);
+                    Thread.Sleep(450);
                     ResizeAndFocusCompanionWindow(appHwnd);
-                    Thread.Sleep(250);
                     return appHwnd;
                 }
             }
@@ -1860,37 +1869,38 @@ namespace MagicCursorNative
             IntPtr aiHwnd = OpenAndPositionAiDesktopApp(targetApp);
             if (aiHwnd == IntPtr.Zero) return;
 
+            // Focus the composer input ONCE after resizing!
             ClickAndFocusComposerInput(aiHwnd, targetApp);
 
             bool hasAttachments = (imageFiles.Count > 0 || otherFiles.Count > 0);
+            List<string> allAttachmentFiles = new List<string>();
+            allAttachmentFiles.AddRange(imageFiles);
+            allAttachmentFiles.AddRange(otherFiles);
 
-            foreach (string imgPath in imageFiles)
+            if (allAttachmentFiles.Count > 0)
             {
                 try
                 {
-                    using (Image img = Image.FromFile(imgPath))
+                    if (imageFiles.Count == 1 && otherFiles.Count == 0)
                     {
-                        SetClipboardImageRetry(img);
+                        // Single image crop: put bitmap on clipboard and paste immediately in one shot!
+                        using (Image img = Image.FromFile(imageFiles[0]))
+                        {
+                            SetClipboardImageRetry(img);
+                        }
+                        SendCtrlV();
+                        Thread.Sleep(90);
                     }
-                    Thread.Sleep(120);
-                    ClickAndFocusComposerInput(aiHwnd, targetApp);
-                    SendCtrlV();
-                    Thread.Sleep(450);
-                }
-                catch { }
-            }
-
-            if (otherFiles.Count > 0)
-            {
-                try
-                {
-                    StringCollection sc = new StringCollection();
-                    foreach (string fp in otherFiles) sc.Add(fp);
-                    SetClipboardFileDropListRetry(sc);
-                    Thread.Sleep(120);
-                    ClickAndFocusComposerInput(aiHwnd, targetApp);
-                    SendCtrlV();
-                    Thread.Sleep(450);
+                    else
+                    {
+                        // Multiple images and/or files: batch ALL attachments into a single FileDropList
+                        // and paste them all at once with ONE Ctrl+V instead of one-by-one!
+                        StringCollection sc = new StringCollection();
+                        foreach (string fp in allAttachmentFiles) sc.Add(fp);
+                        SetClipboardFileDropListRetry(sc);
+                        SendCtrlV();
+                        Thread.Sleep(110);
+                    }
                 }
                 catch { }
             }
@@ -1898,26 +1908,22 @@ namespace MagicCursorNative
             if (!string.IsNullOrWhiteSpace(prompt))
             {
                 SetClipboardTextRetry(prompt);
-                Thread.Sleep(120);
-                ClickAndFocusComposerInput(aiHwnd, targetApp);
+                Thread.Sleep(15);
                 SendCtrlV();
-                // When an image/file attachment was just pasted, Gemini/Claude/ChatGPT briefly disable
-                // the Send button (for ~500-900ms) while the attachment finishes uploading/staging.
-                // Send Enter at +250ms, and if attachments were included, send a follow-up Enter at +750ms
-                // so the prompt is guaranteed to submit once the attachment upload finishes!
-                Thread.Sleep(hasAttachments ? 450 : 220);
+                Thread.Sleep(hasAttachments ? 160 : 50);
                 SendEnterKey();
                 if (hasAttachments)
                 {
-                    Thread.Sleep(650);
+                    // Single non-blocking follow-up Enter in case the image upload spinner was still active at +160ms
+                    Thread.Sleep(380);
                     SendEnterKey();
                 }
             }
             else if (hasAttachments)
             {
-                Thread.Sleep(450);
+                Thread.Sleep(180);
                 SendEnterKey();
-                Thread.Sleep(650);
+                Thread.Sleep(380);
                 SendEnterKey();
             }
         }
