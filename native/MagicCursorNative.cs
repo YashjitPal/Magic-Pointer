@@ -354,10 +354,16 @@ namespace MagicCursorNative
             catch { }
         }
 
+        [DllImport("user32.dll")]
+        static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, UIntPtr dwExtraInfo);
+
+        const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+        const uint MOUSEEVENTF_LEFTUP = 0x0004;
+
         [STAThread]
         static void Main(string[] args)
         {
-            Console.OutputEncoding = Encoding.UTF8;
+            try { Console.OutputEncoding = Encoding.UTF8; } catch { }
             SetProcessDPIAware();
 
             if (args.Length > 0 && args[0] == "--capture")
@@ -998,6 +1004,28 @@ namespace MagicCursorNative
                         {
                             EmitWindowAOIs();
                         }
+                        else if (line.StartsWith("OPEN_AI:"))
+                        {
+                            string appTarget = line.Substring("OPEN_AI:".Length).Trim();
+                            Thread t = new Thread(() =>
+                            {
+                                try { OpenAndPositionAiDesktopApp(appTarget); } catch { }
+                            });
+                            t.SetApartmentState(ApartmentState.STA);
+                            t.IsBackground = true;
+                            t.Start();
+                        }
+                        else if (line.StartsWith("SEND:"))
+                        {
+                            string payloadFile = line.Substring("SEND:".Length).Trim();
+                            Thread t = new Thread(() =>
+                            {
+                                try { RunSendMode(payloadFile); } catch { }
+                            });
+                            t.SetApartmentState(ApartmentState.STA);
+                            t.IsBackground = true;
+                            t.Start();
+                        }
                         else if (line.StartsWith("CROP:"))
                         {
                             // Format: CROP:reqId|x|y|w|h|outPath
@@ -1500,7 +1528,7 @@ namespace MagicCursorNative
             {
                 // 1. Restore from maximized/minimized state (`SW_RESTORE = 9`) so `SetWindowPos` can resize it out of full screen
                 ShowWindow(appHwnd, SW_RESTORE);
-                Thread.Sleep(40);
+                Thread.Sleep(50);
 
                 // 2. Compute floating companion bounds on the right side of the primary display work area
                 Rectangle workArea = Screen.PrimaryScreen.WorkingArea;
@@ -1512,21 +1540,59 @@ namespace MagicCursorNative
 
                 SetWindowPos(appHwnd, IntPtr.Zero, targetX, targetY, targetW, targetH, SWP_NOZORDER | SWP_SHOWWINDOW);
 
-                // 3. Bring to foreground focus cleanly
+                // 3. Bring to foreground focus cleanly (attaching to both current foreground thread AND target window thread!)
                 uint dummyPid;
                 uint fgThread = GetWindowThreadProcessId(GetForegroundWindow(), out dummyPid);
+                uint appThread = GetWindowThreadProcessId(appHwnd, out dummyPid);
                 uint curThread = GetCurrentThreadId();
-                if (fgThread != 0 && fgThread != curThread)
+
+                if (fgThread != 0 && fgThread != curThread) AttachThreadInput(curThread, fgThread, true);
+                if (appThread != 0 && appThread != curThread) AttachThreadInput(curThread, appThread, true);
+
+                SetForegroundWindow(appHwnd);
+                BringWindowToTop(appHwnd);
+
+                if (appThread != 0 && appThread != curThread) AttachThreadInput(curThread, appThread, false);
+                if (fgThread != 0 && fgThread != curThread) AttachThreadInput(curThread, fgThread, false);
+            }
+            catch { }
+        }
+
+        static void ClickAndFocusComposerInput(IntPtr appHwnd, string targetApp)
+        {
+            if (appHwnd == IntPtr.Zero) return;
+            try
+            {
+                // Ensure the window is foregrounded
+                SetForegroundWindow(appHwnd);
+                BringWindowToTop(appHwnd);
+                Thread.Sleep(60);
+
+                // In Gemini, Claude, and ChatGPT desktop Electron apps, the prompt composer box sits
+                // horizontally centered near the bottom of the companion window (~88% height).
+                // Clicking inside the composer area ensures the inner WebContentsView / rich-textarea
+                // receives keyboard focus before we send Ctrl+V and Enter!
+                RECT r;
+                if (GetWindowRect(appHwnd, out r))
                 {
-                    AttachThreadInput(curThread, fgThread, true);
-                    SetForegroundWindow(appHwnd);
-                    BringWindowToTop(appHwnd);
-                    AttachThreadInput(curThread, fgThread, false);
-                }
-                else
-                {
-                    SetForegroundWindow(appHwnd);
-                    BringWindowToTop(appHwnd);
+                    int w = r.Right - r.Left;
+                    int h = r.Bottom - r.Top;
+                    if (w > 200 && h > 200)
+                    {
+                        POINT origPt;
+                        GetCursorPos(out origPt);
+
+                        int clickX = r.Left + (w / 2);
+                        int clickY = r.Bottom - Math.Max(68, (int)Math.Round(h * 0.11));
+                        Cursor.Position = new System.Drawing.Point(clickX, clickY);
+                        Thread.Sleep(30);
+                        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+                        Thread.Sleep(20);
+                        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+                        Thread.Sleep(60);
+
+                        Cursor.Position = new System.Drawing.Point(origPt.X, origPt.Y);
+                    }
                 }
             }
             catch { }
@@ -1625,6 +1691,8 @@ namespace MagicCursorNative
 
             IntPtr aiHwnd = OpenAndPositionAiDesktopApp(targetApp);
             if (aiHwnd == IntPtr.Zero) return;
+
+            ClickAndFocusComposerInput(aiHwnd, targetApp);
 
             foreach (string imgPath in imageFiles)
             {

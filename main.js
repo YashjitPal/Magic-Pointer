@@ -73,6 +73,13 @@ function isTargetAppInstalled(id) {
   try {
     const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
     const winApps = path.join(localAppData, 'Microsoft', 'WindowsApps');
+    let winAppsEntries = [];
+    try {
+      if (fs.existsSync(winApps)) {
+        winAppsEntries = fs.readdirSync(winApps);
+      }
+    } catch (_) {}
+
     if (id === 'gemini') {
       const candidates = [
         path.join(localAppData, 'Google', 'Gemini', 'Gemini.exe'),
@@ -85,8 +92,10 @@ function isTargetAppInstalled(id) {
       return candidates.some((p) => fs.existsSync(p));
     }
     if (id === 'claude') {
+      if (winAppsEntries.some((name) => /^claude(-desktop)?\.exe$|^Claude_/i.test(name))) {
+        return true;
+      }
       const candidates = [
-        path.join(winApps, 'claude-desktop.exe'),
         path.join(localAppData, 'AnthropicClaude', 'claude.exe'),
         path.join(localAppData, 'Programs', 'Claude', 'Claude.exe'),
         path.join(localAppData, 'Programs', 'claude', 'claude.exe')
@@ -94,8 +103,10 @@ function isTargetAppInstalled(id) {
       return candidates.some((p) => fs.existsSync(p));
     }
     if (id === 'chatgpt') {
+      if (winAppsEntries.some((name) => /^chatgpt(-desktop)?\.exe$|^OpenAI\.Codex/i.test(name))) {
+        return true;
+      }
       const candidates = [
-        path.join(winApps, 'chatgpt-desktop.exe'),
         path.join(localAppData, 'Programs', 'ChatGPT', 'ChatGPT.exe'),
         path.join(localAppData, 'ChatGPT', 'ChatGPT.exe'),
         path.join(localAppData, 'OpenAI', 'ChatGPT', 'ChatGPT.exe')
@@ -587,8 +598,7 @@ function createTray() {
       {
         label: `Open ${getTargetAppDisplayName(targetApp)} Desktop App (Companion Window)`,
         click: () => {
-          const exePath = getNativeWatcherExePath();
-          spawn(exePath, ['--open-ai-app', targetApp], { windowsHide: true });
+          sendWatcherCommand(`OPEN_AI:${targetApp}`);
         }
       },
       { type: 'separator' },
@@ -811,12 +821,16 @@ ipcMain.handle('magic-pointer:send-to-gemini', async (_event, payload) => {
 
   fs.writeFileSync(payloadFile, lines.join('\n'), 'utf8');
 
-  const exePath = getNativeWatcherExePath();
-  spawn(exePath, ['--send', payloadFile], {
-    windowsHide: true,
-    detached: true,
-    stdio: 'ignore'
-  }).unref();
+  // Send via the persistent nativeWatcher stdin pipe (which holds the foreground focus token)
+  // AND wrap Console.OutputEncoding in try/catch if spawned standalone as fallback!
+  if (nativeWatcher && nativeWatcher.stdin && nativeWatcher.stdin.writable) {
+    sendWatcherCommand(`SEND:${payloadFile}`);
+  } else {
+    const exePath = getNativeWatcherExePath();
+    spawn(exePath, ['--send', payloadFile], {
+      windowsHide: true
+    }).unref();
+  }
 
   return { ok: true, targetApp: resolvedApp };
 });
