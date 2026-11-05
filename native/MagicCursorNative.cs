@@ -1279,7 +1279,6 @@ namespace MagicCursorNative
         {
             string app = (targetApp ?? "gemini").Trim().ToLowerInvariant();
             IntPtr foundExact = IntPtr.Zero;
-            IntPtr foundFallback = IntPtr.Zero;
             EnumWindows((hWnd, lParam) =>
             {
                 if (!IsWindowVisible(hWnd)) return true;
@@ -1289,16 +1288,6 @@ namespace MagicCursorNative
                 if (string.IsNullOrEmpty(title)) return true;
                 if (title.IndexOf("Magic Pointer", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     title.IndexOf("Magic Cursor", StringComparison.OrdinalIgnoreCase) >= 0)
-                {
-                    return true;
-                }
-
-                // Ignore Chrome / Edge / Brave / Firefox browser tabs so we ONLY target standalone AI Desktop Apps!
-                if (title.IndexOf("Google Chrome", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    title.IndexOf("Microsoft\u200b Edge", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    title.IndexOf("Microsoft Edge", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    title.IndexOf("Brave", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    title.IndexOf("Mozilla Firefox", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     return true;
                 }
@@ -1318,62 +1307,41 @@ namespace MagicCursorNative
                     catch { }
                 }
 
-                if (procName.Equals("chrome", StringComparison.OrdinalIgnoreCase) ||
-                    procName.Equals("msedge", StringComparison.OrdinalIgnoreCase) ||
-                    procName.Equals("brave", StringComparison.OrdinalIgnoreCase) ||
-                    procName.Equals("firefox", StringComparison.OrdinalIgnoreCase) ||
-                    procName.Equals("cursor", StringComparison.OrdinalIgnoreCase) ||
-                    procName.Equals("Code", StringComparison.OrdinalIgnoreCase))
-                {
-                    return true;
-                }
-
+                // Strictly match the actual process executable name of the target AI Desktop App
+                // so IDEs / browsers / other apps (like Antigravity, Cursor, VS Code, Chrome, etc.)
+                // that happen to have "Gemini", "Claude", or "ChatGPT" in their window title are NEVER matched!
                 if (app == "claude")
                 {
-                    if (procName.IndexOf("claude", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                        title.Trim().Equals("Claude", StringComparison.OrdinalIgnoreCase))
+                    if (procName.Equals("claude", StringComparison.OrdinalIgnoreCase) ||
+                        procName.Equals("claude-desktop", StringComparison.OrdinalIgnoreCase) ||
+                        procName.Equals("AnthropicClaude", StringComparison.OrdinalIgnoreCase))
                     {
                         foundExact = hWnd;
                         return false;
-                    }
-                    if (title.IndexOf("Claude", StringComparison.OrdinalIgnoreCase) >= 0 && foundFallback == IntPtr.Zero)
-                    {
-                        foundFallback = hWnd;
                     }
                 }
                 else if (app == "chatgpt")
                 {
-                    if (procName.IndexOf("ChatGPT", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                        procName.Equals("Codex", StringComparison.OrdinalIgnoreCase) ||
-                        title.Trim().Equals("ChatGPT", StringComparison.OrdinalIgnoreCase))
+                    if (procName.Equals("ChatGPT", StringComparison.OrdinalIgnoreCase) ||
+                        procName.Equals("chatgpt-desktop", StringComparison.OrdinalIgnoreCase) ||
+                        procName.Equals("Codex", StringComparison.OrdinalIgnoreCase))
                     {
                         foundExact = hWnd;
                         return false;
-                    }
-                    if ((title.IndexOf("ChatGPT", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                         title.IndexOf("Codex", StringComparison.OrdinalIgnoreCase) >= 0) &&
-                        foundFallback == IntPtr.Zero)
-                    {
-                        foundFallback = hWnd;
                     }
                 }
                 else
                 {
-                    if (procName.IndexOf("Gemini", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                        title.Trim().Equals("Gemini", StringComparison.OrdinalIgnoreCase) ||
-                        title.IndexOf("Google Gemini", StringComparison.OrdinalIgnoreCase) >= 0)
+                    if (procName.Equals("Gemini", StringComparison.OrdinalIgnoreCase) ||
+                        procName.Equals("GoogleGemini", StringComparison.OrdinalIgnoreCase))
                     {
                         foundExact = hWnd;
                         return false;
                     }
-                    if (title.IndexOf("Gemini", StringComparison.OrdinalIgnoreCase) >= 0 && foundFallback == IntPtr.Zero)
-                    {
-                        foundFallback = hWnd;
-                    }
                 }
                 return true;
             }, IntPtr.Zero);
-            return foundExact != IntPtr.Zero ? foundExact : foundFallback;
+            return foundExact;
         }
 
         static void SendWinShiftG()
