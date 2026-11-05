@@ -134,6 +134,7 @@ const state = {
 
 // DOM Elements
 const magicRoot = document.getElementById('magic-root');
+const screenshotFreezeImg = document.getElementById('screenshot-freeze-img');
 const scrimCanvas = document.getElementById('scrim-canvas');
 const energyCanvas = document.getElementById('energy-shader-canvas');
 const aoiCardsLayer = document.getElementById('aoi-cards-layer');
@@ -897,6 +898,20 @@ getOrCreateVisionWorker();
 async function processScreenshotForMobileRaid(screenshotInfo) {
   if (!screenshotInfo || !screenshotInfo.path) return;
   const worker = getOrCreateVisionWorker();
+  const srcUrl = `file:///${screenshotInfo.path.replace(/\\/g, '/')}?t=${screenshotInfo.timestamp || Date.now()}`;
+
+  // Exact port of MainScreenKt.java:55623:
+  // Render the captured screenshot full-screen behind AoiOverlayCanvas so the screen freezes
+  // visually at the exact frame Magic Pointer was triggered!
+  if (screenshotFreezeImg) {
+    screenshotFreezeImg.onload = () => {
+      if (state.active) {
+        screenshotFreezeImg.classList.remove('hidden');
+      }
+    };
+    screenshotFreezeImg.src = srcUrl;
+  }
+
   if (!worker) return;
 
   const img = new Image();
@@ -932,7 +947,7 @@ async function processScreenshotForMobileRaid(screenshotInfo) {
       console.warn('processScreenshotForMobileRaid bitmap transfer error:', err);
     }
   };
-  img.src = `file:///${screenshotInfo.path.replace(/\\/g, '/')}?t=${screenshotInfo.timestamp || Date.now()}`;
+  img.src = srcUrl;
 }
 
 // Exact port of AOIDetectorImpl.triggerScreenElementSegmentation (AOIDetectorImpl.java:293, 1343-1560):
@@ -3243,7 +3258,8 @@ function getContextualSuggestions() {
   if (state.llmSuggestionsEnabled && state.llmModelDownloaded) {
     if (state.llmChipsCache.has(aoiIdsKey)) {
       geminiPrompts = state.llmChipsCache.get(aoiIdsKey);
-    } else {
+    } else if (state.inflightLlmKey !== aoiIdsKey) {
+      state.inflightLlmKey = aoiIdsKey;
       const worker = getOrCreateLlmWorker();
       if (worker) {
         const firstImageAoi = state.selectedAOIs.find((a) => a.dataUrl && a.type !== 'text');
@@ -3753,7 +3769,7 @@ function hideM3Tooltip() {
   m3PlainTooltip.classList.add('hidden');
 }
 
-[btnAddAoiTile, btnCollapseSave, btnClearClose, btnSendPrompt].forEach((btn) => {
+[btnAddContent, btnAddAoiTile, btnCollapseSave, btnClearClose, btnSendPrompt].forEach((btn) => {
   if (!btn) return;
   btn.addEventListener('mouseenter', () => showM3Tooltip(btn));
   btn.addEventListener('mouseleave', hideM3Tooltip);
@@ -4358,7 +4374,7 @@ function activateOverlay(data) {
   if (data.llmModelDirUrl) state.llmModelDirUrl = data.llmModelDirUrl;
   syncLlmSettingsUI();
 
-  if (!wasActive) {
+    if (!wasActive) {
     // Exact port of AOIDetectorImpl.resetMonitoringState() (AOIDetectorImpl.java:552-600):
     // Clear all previous session's OCR blocks, MobileRaid AOIs, sub-elements, and hover state
     // so stale rectangles from an older screen or scroll position NEVER appear!
@@ -4376,6 +4392,10 @@ function activateOverlay(data) {
     state.hoverCardAlpha = 0;
     state.scrimCutOutAlpha = 0;
     state.hasFirstAoiAmbientTransitionPlayed = false;
+    if (screenshotFreezeImg) {
+      screenshotFreezeImg.classList.add('hidden');
+      screenshotFreezeImg.removeAttribute('src');
+    }
 
     // New session: reset per-session launch timestamp, idle-hint & interaction flags (MainScreenStateFragmentPeer.java)
     state.launchTimestampMs = performance.now();
@@ -4549,6 +4569,10 @@ api.onDeactivate(() => {
   state.offlineTimer = null;
   hideM3Tooltip();
   hideSnackbar(true);
+  if (screenshotFreezeImg) {
+    screenshotFreezeImg.classList.add('hidden');
+    screenshotFreezeImg.removeAttribute('src');
+  }
   scrimCanvas.classList.remove('visible');
   magicRoot.classList.add('hidden');
   closeFte();

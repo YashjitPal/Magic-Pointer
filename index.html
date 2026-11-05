@@ -9,6 +9,9 @@
 <body class="theme-dark">
   <!-- Fullscreen overlay container (hidden when inactive) -->
   <div id="magic-root" class="magic-root hidden">
+    <!-- Frozen Screen Snapshot Layer (MainScreenKt.java:55623: Image($screenshot, ContentScale.Crop) rendered behind AoiOverlayCanvas so the screen freezes visually on activation!) -->
+    <img id="screenshot-freeze-img" class="screenshot-freeze-img hidden" alt="Screenshot of the screen" />
+
     <!-- Scrim + Cutout Canvas for Screen Region Selection (OVERLAY_ALPHA = 0.32f, 100ms fade-in) -->
     <canvas id="scrim-canvas" class="scrim-canvas"></canvas>
 
@@ -51,7 +54,7 @@
           <!-- ContextControls Row (PromptBoxKt.smali lines 33316-33410: padding left=20dp/8dp, right=20dp/8dp, top=8dp, bottom=8dp) -->
           <div id="context-controls" class="context-controls">
             <div id="add-btn-container" class="add-btn-container hidden">
-              <button id="btn-add-content" class="icon-btn add-content-btn" data-testid="prompt-box-add-aoi-button" aria-label="Add item">
+              <button id="btn-add-content" class="icon-btn add-content-btn" data-testid="prompt-box-add-aoi-button" data-tooltip="Add content" aria-label="Add item">
                 <img src="extracted_assets/svg/ic_add_24.svg" alt="Add content" class="icon-svg icon-variant" />
               </button>
             </div>

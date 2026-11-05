@@ -21,10 +21,9 @@ async function ensureTransformersLoaded() {
     envObj = mod.env;
     const baseUrl = new URL('./extracted_assets/transformers/dist/', self.location.href).href;
     envObj.backends.onnx.wasm.wasmPaths = baseUrl;
-    // Enable multi-threaded XNNPACK/WASM SIMD inside the background Worker (up to 4 threads)
-    // so the 248M LLM + ViT-GPT2 vision model run in ~180-300ms with zero main-thread impact!
-    const cores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) ? navigator.hardwareConcurrency : 4;
-    envObj.backends.onnx.wasm.numThreads = Math.max(1, Math.min(4, Math.floor(cores / 2)));
+    // Keep numThreads = 1 inside the background Worker so ONNX Runtime never spawns
+    // competing worker threads that contend with the 120fps WebGL UI thread!
+    envObj.backends.onnx.wasm.numThreads = 1;
     envObj.useBrowserCache = false;
     envObj.allowRemoteModels = false;
     envObj.allowLocalModels = true;
@@ -380,32 +379,38 @@ self.onmessage = async (e) => {
     let imageCaption = '';
     let visualLabels = [];
     const llmSuggestions = [];
+    const cleanOcr = (ocrText || '').replace(/\s+/g, ' ').trim().slice(0, 200);
 
     try {
-      // Step 1: If an image crop is present, run BOTH ViT-GPT2 image captioning AND ResNet-50 object classification in parallel!
+      // Wait for the 200ms PromptBox expand animation to finish before heavy WASM SIMD inference starts!
+      await new Promise((r) => setTimeout(r, 180));
+
+      // Step 1: If an image crop is present, run fast ResNet-50 (15ms), and ONLY run heavy ViT-GPT2 captioning
+      // when there is little/no OCR text on the image!
       if (imageDataUrl) {
-        const [captioner, clf] = await Promise.all([
-          getImageCaptioner(baseDir),
-          getImageClassifier(baseDir)
-        ]);
-        const [capOut, preds] = await Promise.all([
-          captioner ? captioner(imageDataUrl, { max_new_tokens: 20 }) : Promise.resolve(null),
-          clf ? clf(imageDataUrl, { topk: 3 }) : Promise.resolve(null)
-        ]);
-        if (Array.isArray(capOut) && capOut[0] && capOut[0].generated_text) {
-          imageCaption = String(capOut[0].generated_text).trim();
+        const clf = await getImageClassifier(baseDir);
+        if (clf) {
+          const preds = await clf(imageDataUrl, { topk: 3 });
+          if (Array.isArray(preds)) {
+            visualLabels = preds
+              .filter((p) => p && p.score >= 0.12 && p.label)
+              .map((p) => p.label);
+          }
         }
-        if (Array.isArray(preds)) {
-          visualLabels = preds
-            .filter((p) => p && p.score >= 0.12 && p.label)
-            .map((p) => p.label);
+        if (cleanOcr.length < 30) {
+          const captioner = await getImageCaptioner(baseDir);
+          if (captioner) {
+            const capOut = await captioner(imageDataUrl, { max_new_tokens: 14 });
+            if (Array.isArray(capOut) && capOut[0] && capOut[0].generated_text) {
+              imageCaption = String(capOut[0].generated_text).trim();
+            }
+          }
         }
       }
 
-      // Step 2: Run 248M LaMini-Flan-T5-248M across the 3 Googlebook intent categories (Analyze, Transform, Ideate)
+      // Step 2: Run ONE single pass of 248M LaMini-Flan-T5-248M (3x faster than 3 sequential passes!)
       const gen = await getTextGenerator(baseDir);
       const topVis = cleanVisualLabel(visualLabels[0]);
-      const cleanOcr = (ocrText || '').replace(/\s+/g, ' ').trim().slice(0, 220);
 
       let contextSummary = '';
       if (cleanOcr && imageCaption) {
@@ -419,24 +424,18 @@ self.onmessage = async (e) => {
       }
 
       if (gen && contextSummary) {
-        // Few-shot instruction prompts tailored for Flan-T5-248M so it outputs clean, imperative/question chips <=45 chars:
-        const prompts = [
-          `Context: Image of a houseplant. Suggestion: How do I care for this plant?\nContext: Article about Artemis II launch. Suggestion: Summarize the key points here\nContext: ${contextSummary}.\nWrite one short 5-word question or action to explain or analyze this:`,
-          `Context: Email thread about project launch. Suggestion: Draft a polite reply to this\nContext: Table of Q3 website traffic stats. Suggestion: Turn these stats into a table\nContext: ${contextSummary}.\nWrite one short 5-word command to summarize, rewrite, or organize this:`,
-          `Context: Photo of running shoes on a website. Suggestion: Compare with similar running shoes\nContext: Recipe and ingredients for bean stew. Suggestion: Brainstorm similar recipes with these\nContext: ${contextSummary}.\nWrite one short 5-word action to plan next steps or explore related ideas:`
-        ];
-
-        for (const p of prompts) {
-          const out = await gen(p, {
-            max_new_tokens: 14,
-            do_sample: false,
-            repetition_penalty: 1.2
-          });
-          if (Array.isArray(out) && out[0] && out[0].generated_text) {
-            const candidate = out[0].generated_text
-              .replace(/^(Suggestion|Action|Question|Command|Output):\s*/i, '')
-              .split(/[\n\t.?!]/)[0]
-              .trim();
+        const prompt = `Context: Image of a houseplant. Suggestion: How do I care for this plant?\nContext: Article about Artemis II launch. Suggestion: Summarize the key points here\nContext: ${contextSummary}.\nWrite one short 5-word question or action for this:`;
+        const out = await gen(prompt, {
+          max_new_tokens: 12,
+          do_sample: false,
+          repetition_penalty: 1.2
+        });
+        if (Array.isArray(out) && out[0] && out[0].generated_text) {
+          const candidates = out[0].generated_text
+            .replace(/^(Suggestion|Action|Question|Command|Output):\s*/i, '')
+            .split(/[\n\t;]+/);
+          for (const rawCand of candidates) {
+            const candidate = rawCand.split(/[.?!]/)[0].trim();
             if (isGoodGeneratedChip(candidate, cleanOcr)) {
               llmSuggestions.push(candidate);
             }

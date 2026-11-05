@@ -103,6 +103,21 @@ button, textarea, input, div, a, span, canvas, img, svg, path, p, h1, h2, kbd {
 }
 
 /* ============================================================================
+   0. Frozen Screenshot Layer (MainScreenKt.java:55623: Image($screenshot))
+      Visually freezes the desktop at the exact moment Magic Pointer activates!
+   ============================================================================ */
+.screenshot-freeze-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  z-index: 0;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* ============================================================================
    1. Fullscreen Scrim & Cutout Canvas (OVERLAY_ALPHA = 0.32f, 100ms fade-in)
    ============================================================================ */
 .scrim-canvas {
