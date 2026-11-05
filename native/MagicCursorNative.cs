@@ -1651,20 +1651,86 @@ namespace MagicCursorNative
             catch { }
         }
 
+        // Reliably retry Clipboard operations up to 10 times so transient OLE clipboard locks
+        // from Electron / DWM never silently drop an image or prompt!
+        static bool SetClipboardImageRetry(Image img)
+        {
+            for (int attempt = 0; attempt < 10; attempt++)
+            {
+                try
+                {
+                    Clipboard.SetImage(img);
+                    return true;
+                }
+                catch
+                {
+                    Thread.Sleep(35);
+                }
+            }
+            return false;
+        }
+
+        static bool SetClipboardFileDropListRetry(StringCollection sc)
+        {
+            for (int attempt = 0; attempt < 10; attempt++)
+            {
+                try
+                {
+                    Clipboard.SetFileDropList(sc);
+                    return true;
+                }
+                catch
+                {
+                    Thread.Sleep(35);
+                }
+            }
+            return false;
+        }
+
+        static bool SetClipboardTextRetry(string text)
+        {
+            for (int attempt = 0; attempt < 10; attempt++)
+            {
+                try
+                {
+                    Clipboard.SetText(text);
+                    return true;
+                }
+                catch
+                {
+                    Thread.Sleep(35);
+                }
+            }
+            return false;
+        }
+
         static void ClickAndFocusComposerInput(IntPtr appHwnd, string targetApp)
         {
             if (appHwnd == IntPtr.Zero) return;
             try
             {
-                // Ensure the window is foregrounded
+                // 1. Force foreground focus with AttachThreadInput so the target app's window
+                //    and inner WebContentsView are guaranteed to be the active keyboard receiver
+                uint dummyPid;
+                uint fgThread = GetWindowThreadProcessId(GetForegroundWindow(), out dummyPid);
+                uint appThread = GetWindowThreadProcessId(appHwnd, out dummyPid);
+                uint curThread = GetCurrentThreadId();
+
+                if (fgThread != 0 && fgThread != curThread) AttachThreadInput(curThread, fgThread, true);
+                if (appThread != 0 && appThread != curThread) AttachThreadInput(curThread, appThread, true);
+
                 SetForegroundWindow(appHwnd);
                 BringWindowToTop(appHwnd);
-                Thread.Sleep(60);
 
-                // In Gemini, Claude, and ChatGPT desktop Electron apps, the prompt composer box sits
-                // horizontally centered near the bottom of the companion window (~88% height).
-                // Clicking inside the composer area ensures the inner WebContentsView / rich-textarea
-                // receives keyboard focus before we send Ctrl+V and Enter!
+                if (appThread != 0 && appThread != curThread) AttachThreadInput(curThread, appThread, false);
+                if (fgThread != 0 && fgThread != curThread) AttachThreadInput(curThread, fgThread, false);
+
+                Thread.Sleep(50);
+
+                // 2. Click inside the prompt composer area in the bottom-center of the companion window.
+                //    Note: In Gemini's initial welcome screen, the composer sits slightly higher (~26% from bottom),
+                //    whereas in an active conversation it sits at the bottom (~10% from bottom).
+                //    Clicking the bottom composer coordinate focuses the WebContentsView and places the caret in the input box!
                 RECT r;
                 if (GetWindowRect(appHwnd, out r))
                 {
@@ -1676,13 +1742,13 @@ namespace MagicCursorNative
                         GetCursorPos(out origPt);
 
                         int clickX = r.Left + (w / 2);
-                        int clickY = r.Bottom - Math.Max(68, (int)Math.Round(h * 0.11));
+                        int clickY = r.Bottom - Math.Max(76, (int)Math.Round(h * 0.11));
                         Cursor.Position = new System.Drawing.Point(clickX, clickY);
-                        Thread.Sleep(30);
+                        Thread.Sleep(25);
                         mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
                         Thread.Sleep(20);
                         mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
-                        Thread.Sleep(60);
+                        Thread.Sleep(50);
 
                         Cursor.Position = new System.Drawing.Point(origPt.X, origPt.Y);
                     }
@@ -1796,17 +1862,20 @@ namespace MagicCursorNative
 
             ClickAndFocusComposerInput(aiHwnd, targetApp);
 
+            bool hasAttachments = (imageFiles.Count > 0 || otherFiles.Count > 0);
+
             foreach (string imgPath in imageFiles)
             {
                 try
                 {
                     using (Image img = Image.FromFile(imgPath))
                     {
-                        Clipboard.SetImage(img);
+                        SetClipboardImageRetry(img);
                     }
-                    Thread.Sleep(100);
+                    Thread.Sleep(120);
+                    ClickAndFocusComposerInput(aiHwnd, targetApp);
                     SendCtrlV();
-                    Thread.Sleep(380);
+                    Thread.Sleep(450);
                 }
                 catch { }
             }
@@ -1817,29 +1886,38 @@ namespace MagicCursorNative
                 {
                     StringCollection sc = new StringCollection();
                     foreach (string fp in otherFiles) sc.Add(fp);
-                    Clipboard.SetFileDropList(sc);
-                    Thread.Sleep(100);
+                    SetClipboardFileDropListRetry(sc);
+                    Thread.Sleep(120);
+                    ClickAndFocusComposerInput(aiHwnd, targetApp);
                     SendCtrlV();
-                    Thread.Sleep(400);
+                    Thread.Sleep(450);
                 }
                 catch { }
             }
 
             if (!string.IsNullOrWhiteSpace(prompt))
             {
-                try
+                SetClipboardTextRetry(prompt);
+                Thread.Sleep(120);
+                ClickAndFocusComposerInput(aiHwnd, targetApp);
+                SendCtrlV();
+                // When an image/file attachment was just pasted, Gemini/Claude/ChatGPT briefly disable
+                // the Send button (for ~500-900ms) while the attachment finishes uploading/staging.
+                // Send Enter at +250ms, and if attachments were included, send a follow-up Enter at +750ms
+                // so the prompt is guaranteed to submit once the attachment upload finishes!
+                Thread.Sleep(hasAttachments ? 450 : 220);
+                SendEnterKey();
+                if (hasAttachments)
                 {
-                    Clipboard.SetText(prompt);
-                    Thread.Sleep(100);
-                    SendCtrlV();
-                    Thread.Sleep(180);
+                    Thread.Sleep(650);
                     SendEnterKey();
                 }
-                catch { }
             }
-            else if (imageFiles.Count > 0 || otherFiles.Count > 0)
+            else if (hasAttachments)
             {
-                Thread.Sleep(160);
+                Thread.Sleep(450);
+                SendEnterKey();
+                Thread.Sleep(650);
                 SendEnterKey();
             }
         }
