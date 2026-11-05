@@ -486,17 +486,10 @@ function createTray() {
       },
       { type: 'separator' },
       {
-        label: 'Open Gemini in Chrome Floating Head (Alt+G)',
+        label: 'Open Gemini Desktop App (Companion Window)',
         click: () => {
           const exePath = getNativeWatcherExePath();
-          spawn(exePath, ['--alt-g'], { windowsHide: true });
-        }
-      },
-      {
-        label: 'Gemini in Chrome Selection Mode (Ctrl+Alt+G)',
-        click: () => {
-          const exePath = getNativeWatcherExePath();
-          spawn(exePath, ['--ctrl-alt-g'], { windowsHide: true });
+          spawn(exePath, ['--open-gemini-app'], { windowsHide: true });
         }
       },
       { type: 'separator' },
@@ -690,25 +683,13 @@ ipcMain.handle('magic-pointer:send-to-gemini', async (_event, payload) => {
 
   fs.writeFileSync(payloadFile, lines.join('\n'), 'utf8');
 
-  const exePath = path.join(__dirname, 'native', 'MagicCursorNative.exe');
+  const exePath = getNativeWatcherExePath();
   spawn(exePath, ['--send', payloadFile], {
     windowsHide: true,
     detached: true,
     stdio: 'ignore'
   }).unref();
 
-  return { ok: true };
-});
-
-ipcMain.handle('magic-pointer:trigger-chrome-shortcut', async (_event, mode) => {
-  deactivateMagicPointer();
-  const exePath = getNativeWatcherExePath();
-  const flag = mode === 'ctrl-alt-g' ? '--ctrl-alt-g' : '--alt-g';
-  spawn(exePath, [flag], {
-    windowsHide: true,
-    detached: true,
-    stdio: 'ignore'
-  }).unref();
   return { ok: true };
 });
 

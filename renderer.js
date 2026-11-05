@@ -203,8 +203,7 @@ const api = window.magicPointerAPI || {
   cropAOI: async () => null,
   getWindows: async () => [],
   pickFiles: async () => [],
-  sendToGemini: async () => {},
-  triggerChromeShortcut: async () => {}
+  sendToGemini: async () => {}
 };
 const customCursorImg = document.getElementById('custom-cursor-img');
 

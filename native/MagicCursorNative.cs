@@ -388,15 +388,9 @@ namespace MagicCursorNative
                 return;
             }
 
-            if (args.Length > 0 && args[0] == "--ctrl-alt-g")
+            if (args.Length > 0 && args[0] == "--open-gemini-app")
             {
-                SendCtrlAltG();
-                return;
-            }
-
-            if (args.Length > 0 && args[0] == "--alt-g")
-            {
-                SendAltG();
+                OpenAndPositionGeminiDesktopApp();
                 return;
             }
 
@@ -1204,50 +1198,88 @@ namespace MagicCursorNative
             }
         }
 
-        static IntPtr FindGeminiWindow()
+        const int SW_RESTORE = 9;
+        const uint SWP_NOZORDER = 0x0004;
+
+        static IntPtr FindGeminiDesktopAppWindow()
         {
-            IntPtr found = IntPtr.Zero;
+            IntPtr foundExact = IntPtr.Zero;
+            IntPtr foundFallback = IntPtr.Zero;
             EnumWindows((hWnd, lParam) =>
             {
                 if (!IsWindowVisible(hWnd)) return true;
                 StringBuilder sb = new StringBuilder(256);
                 GetWindowText(hWnd, sb, 256);
                 string title = sb.ToString();
-                if (!string.IsNullOrEmpty(title) &&
-                    (title.IndexOf("Gemini", StringComparison.OrdinalIgnoreCase) >= 0) &&
-                    title.IndexOf("Magic Pointer", StringComparison.OrdinalIgnoreCase) < 0 &&
-                    title.IndexOf("Magic Cursor", StringComparison.OrdinalIgnoreCase) < 0)
+                if (string.IsNullOrEmpty(title)) return true;
+                if (title.IndexOf("Magic Pointer", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    title.IndexOf("Magic Cursor", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
-                    found = hWnd;
+                    return true;
+                }
+
+                // Ignore Chrome / Edge / Brave / Firefox browser tabs so we ONLY target the standalone Gemini Desktop App!
+                if (title.IndexOf("Google Chrome", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    title.IndexOf("Microsoft\u200b Edge", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    title.IndexOf("Microsoft Edge", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    title.IndexOf("Brave", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    title.IndexOf("Mozilla Firefox", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+
+                uint pid = 0;
+                GetWindowThreadProcessId(hWnd, out pid);
+                string procName = "";
+                if (pid != 0)
+                {
+                    try
+                    {
+                        using (Process p = Process.GetProcessById((int)pid))
+                        {
+                            procName = p.ProcessName ?? "";
+                        }
+                    }
+                    catch { }
+                }
+
+                if (procName.Equals("chrome", StringComparison.OrdinalIgnoreCase) ||
+                    procName.Equals("msedge", StringComparison.OrdinalIgnoreCase) ||
+                    procName.Equals("brave", StringComparison.OrdinalIgnoreCase) ||
+                    procName.Equals("firefox", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                if (procName.IndexOf("Gemini", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    title.Trim().Equals("Gemini", StringComparison.OrdinalIgnoreCase) ||
+                    title.IndexOf("Google Gemini", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    foundExact = hWnd;
                     return false;
+                }
+
+                if (title.IndexOf("Gemini", StringComparison.OrdinalIgnoreCase) >= 0 && foundFallback == IntPtr.Zero)
+                {
+                    foundFallback = hWnd;
                 }
                 return true;
             }, IntPtr.Zero);
-            return found;
+            return foundExact != IntPtr.Zero ? foundExact : foundFallback;
         }
 
-        static void SendAltG()
+        static void SendWinShiftG()
         {
-            keybd_event(VK_MENU, 0, 0, UIntPtr.Zero);
+            // Trigger the Gemini Desktop App's native global shortcut (`Win + Shift + G` from `%APPDATA%\gemini\settings.json`)
+            keybd_event(VK_LWIN, 0, 0, UIntPtr.Zero);
+            keybd_event(VK_SHIFT, 0, 0, UIntPtr.Zero);
             Thread.Sleep(25);
             keybd_event(VK_G, 0, 0, UIntPtr.Zero);
             Thread.Sleep(25);
             keybd_event(VK_G, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
             Thread.Sleep(25);
-            keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-        }
-
-        static void SendCtrlAltG()
-        {
-            keybd_event(VK_CONTROL, 0, 0, UIntPtr.Zero);
-            keybd_event(VK_MENU, 0, 0, UIntPtr.Zero);
-            Thread.Sleep(25);
-            keybd_event(VK_G, 0, 0, UIntPtr.Zero);
-            Thread.Sleep(25);
-            keybd_event(VK_G, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-            Thread.Sleep(25);
-            keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
         }
 
         static void SendCtrlV()
@@ -1268,23 +1300,157 @@ namespace MagicCursorNative
             keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
         }
 
-        static void LaunchChromeGeminiFallback()
+        static bool TryLaunchGeminiDesktopAppExecutable()
         {
-            string[] chromePaths = new string[]
+            string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
+            string[] candidateExes = new string[]
             {
-                @"C:\Program Files\Google\Chrome\Application\chrome.exe",
-                @"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Google\Chrome\Application\chrome.exe")
+                Path.Combine(localAppData, @"Google\Gemini\Gemini.exe"),
+                Path.Combine(localAppData, @"Google\Gemini\GeminiAppLauncher.exe"),
+                Path.Combine(localAppData, @"Programs\Gemini\Gemini.exe"),
+                Path.Combine(localAppData, @"Gemini\Gemini.exe"),
+                @"C:\Program Files\Google\Gemini\Gemini.exe",
+                @"C:\Program Files (x86)\Google\Gemini\Gemini.exe"
             };
-            foreach (string cp in chromePaths)
+
+            foreach (string exe in candidateExes)
             {
-                if (File.Exists(cp))
+                if (File.Exists(exe))
                 {
-                    Process.Start(cp, "--app=https://gemini.google.com/app --window-size=440,660");
-                    return;
+                    try
+                    {
+                        Process.Start(new ProcessStartInfo
+                        {
+                            FileName = exe,
+                            WorkingDirectory = Path.GetDirectoryName(exe),
+                            UseShellExecute = true
+                        });
+                        return true;
+                    }
+                    catch { }
                 }
             }
-            Process.Start("https://gemini.google.com/app");
+
+            string[] candidateShortcuts = new string[]
+            {
+                Path.Combine(appData, @"Microsoft\Windows\Start Menu\Programs\Gemini.lnk"),
+                Path.Combine(userProfile, @"Desktop\Gemini.lnk")
+            };
+
+            foreach (string lnk in candidateShortcuts)
+            {
+                if (File.Exists(lnk))
+                {
+                    try
+                    {
+                        Process.Start(new ProcessStartInfo
+                        {
+                            FileName = lnk,
+                            UseShellExecute = true
+                        });
+                        return true;
+                    }
+                    catch { }
+                }
+            }
+
+            return false;
+        }
+
+        // Exact port of Googlebook RobinKit non-fullscreen companion window behavior
+        // (`TextQuery.shouldUseFullScreenMode = false` in `RobinKitServiceGrpcClientImpl.java:455-516`):
+        // Un-maximizes the Gemini Desktop App (`SW_RESTORE`) and resizes/docks it into a floating companion
+        // window on the right side of the work area so it doesn't cover the screen content you just pointed at!
+        static void ResizeAndFocusGeminiCompanionWindow(IntPtr geminiHwnd)
+        {
+            if (geminiHwnd == IntPtr.Zero) return;
+            try
+            {
+                // 1. Restore from maximized/minimized state (`SW_RESTORE = 9`) so `SetWindowPos` can resize it out of full screen
+                ShowWindow(geminiHwnd, SW_RESTORE);
+                Thread.Sleep(40);
+
+                // 2. Compute floating companion bounds on the right side of the primary display work area
+                Rectangle workArea = Screen.PrimaryScreen.WorkingArea;
+                int margin = Math.Max(16, (int)Math.Round(workArea.Width * 0.012));
+                int targetW = Math.Max(460, Math.Min(560, (int)Math.Round(workArea.Width * 0.29)));
+                int targetH = Math.Max(640, Math.Min(workArea.Height - margin * 2, (int)Math.Round(workArea.Height * 0.84)));
+                int targetX = workArea.Right - targetW - margin;
+                int targetY = workArea.Top + Math.Max(margin, (workArea.Height - targetH) / 2);
+
+                SetWindowPos(geminiHwnd, IntPtr.Zero, targetX, targetY, targetW, targetH, SWP_NOZORDER | SWP_SHOWWINDOW);
+
+                // 3. Bring to foreground focus cleanly
+                uint dummyPid;
+                uint fgThread = GetWindowThreadProcessId(GetForegroundWindow(), out dummyPid);
+                uint curThread = GetCurrentThreadId();
+                if (fgThread != 0 && fgThread != curThread)
+                {
+                    AttachThreadInput(curThread, fgThread, true);
+                    SetForegroundWindow(geminiHwnd);
+                    BringWindowToTop(geminiHwnd);
+                    AttachThreadInput(curThread, fgThread, false);
+                }
+                else
+                {
+                    SetForegroundWindow(geminiHwnd);
+                    BringWindowToTop(geminiHwnd);
+                }
+            }
+            catch { }
+        }
+
+        static IntPtr OpenAndPositionGeminiDesktopApp()
+        {
+            IntPtr geminiHwnd = FindGeminiDesktopAppWindow();
+            if (geminiHwnd != IntPtr.Zero)
+            {
+                ResizeAndFocusGeminiCompanionWindow(geminiHwnd);
+                Thread.Sleep(240);
+                return geminiHwnd;
+            }
+
+            // First try launching the standalone Gemini Desktop App executable directly
+            bool launchedExe = TryLaunchGeminiDesktopAppExecutable();
+            if (!launchedExe)
+            {
+                // Otherwise trigger the Gemini Desktop App's global hotkey (`Win + Shift + G`)
+                SendWinShiftG();
+            }
+
+            for (int i = 0; i < 30; i++)
+            {
+                Thread.Sleep(120);
+                geminiHwnd = FindGeminiDesktopAppWindow();
+                if (geminiHwnd != IntPtr.Zero)
+                {
+                    ResizeAndFocusGeminiCompanionWindow(geminiHwnd);
+                    Thread.Sleep(450);
+                    return geminiHwnd;
+                }
+            }
+
+            // If direct exe launch didn't immediately produce the window, also try `Win + Shift + G` once
+            if (launchedExe)
+            {
+                SendWinShiftG();
+                for (int i = 0; i < 16; i++)
+                {
+                    Thread.Sleep(110);
+                    geminiHwnd = FindGeminiDesktopAppWindow();
+                    if (geminiHwnd != IntPtr.Zero)
+                    {
+                        ResizeAndFocusGeminiCompanionWindow(geminiHwnd);
+                        Thread.Sleep(350);
+                        return geminiHwnd;
+                    }
+                }
+            }
+
+            return IntPtr.Zero;
         }
 
         static void RunSendMode(string payloadPath)
@@ -1315,45 +1481,8 @@ namespace MagicCursorNative
                 }
             }
 
-            IntPtr geminiHwnd = FindGeminiWindow();
-            if (geminiHwnd != IntPtr.Zero)
-            {
-                ShowWindow(geminiHwnd, 9);
-                SetForegroundWindow(geminiHwnd);
-                Thread.Sleep(300);
-            }
-            else
-            {
-                SendAltG();
-
-                for (int i = 0; i < 12; i++)
-                {
-                    Thread.Sleep(90);
-                    geminiHwnd = FindGeminiWindow();
-                    if (geminiHwnd != IntPtr.Zero)
-                    {
-                        SetForegroundWindow(geminiHwnd);
-                        Thread.Sleep(300);
-                        break;
-                    }
-                }
-
-                if (geminiHwnd == IntPtr.Zero)
-                {
-                    LaunchChromeGeminiFallback();
-                    for (int i = 0; i < 28; i++)
-                    {
-                        Thread.Sleep(140);
-                        geminiHwnd = FindGeminiWindow();
-                        if (geminiHwnd != IntPtr.Zero)
-                        {
-                            SetForegroundWindow(geminiHwnd);
-                            Thread.Sleep(850);
-                            break;
-                        }
-                    }
-                }
-            }
+            IntPtr geminiHwnd = OpenAndPositionGeminiDesktopApp();
+            if (geminiHwnd == IntPtr.Zero) return;
 
             foreach (string imgPath in imageFiles)
             {

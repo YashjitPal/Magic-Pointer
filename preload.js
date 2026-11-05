@@ -27,7 +27,6 @@ contextBridge.exposeInMainWorld('magicPointerAPI', {
   copyText: (text) => ipcRenderer.invoke('magic-pointer:copy-text', text),
   getWindows: () => ipcRenderer.invoke('magic-pointer:get-windows'),
   pickFiles: () => ipcRenderer.invoke('magic-pointer:pick-files'),
-  sendToGemini: (payload) => ipcRenderer.invoke('magic-pointer:send-to-gemini', payload),
-  triggerChromeShortcut: (mode) => ipcRenderer.invoke('magic-pointer:trigger-chrome-shortcut', mode)
+  sendToGemini: (payload) => ipcRenderer.invoke('magic-pointer:send-to-gemini', payload)
 });
 
