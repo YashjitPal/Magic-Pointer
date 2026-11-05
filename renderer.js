@@ -205,6 +205,7 @@ const api = window.magicPointerAPI || {
   setTheme() {},
   getTargetApp: async () => ({ targetApp: 'gemini', availability: {} }),
   setTargetApp: async () => ({ ok: true }),
+  downloadTargetApp: async () => ({ ok: true }),
   cropAOI: async () => null,
   getWindows: async () => [],
   pickFiles: async () => [],
@@ -2530,17 +2531,64 @@ function syncTargetAppUI() {
     fteDesc.textContent = `With Magic Pointer, point at or drag to select objects on your screen and get help from ${appName}`;
   }
 
+  const avail = state.targetAppAvailability || { gemini: true, claude: true, chatgpt: true };
+  const anyInstalled = !!(avail.gemini || avail.claude || avail.chatgpt);
+  const selectedInstalled = avail[state.targetApp] !== false;
+
   const badge = document.getElementById('target-app-badge');
   if (badge) {
-    const installed = state.targetAppAvailability && state.targetAppAvailability[state.targetApp] !== false;
-    badge.textContent = installed ? `${appName} · Active` : `${appName} · Selected`;
-    badge.classList.toggle('installed', installed);
+    if (!anyInstalled) {
+      badge.textContent = 'No App Installed';
+      badge.classList.remove('installed');
+      badge.classList.add('missing');
+    } else if (selectedInstalled) {
+      badge.textContent = `${appName} · Active`;
+      badge.classList.add('installed');
+      badge.classList.remove('missing');
+    } else {
+      badge.textContent = `${appName} · Not Installed`;
+      badge.classList.remove('installed');
+      badge.classList.add('missing');
+    }
   }
 
   document.querySelectorAll('.target-app-pill').forEach((pill) => {
     const id = pill.getAttribute('data-target-app');
+    const isThisInstalled = avail[id] !== false;
     pill.classList.toggle('active', id === state.targetApp);
+    pill.classList.toggle('not-installed', !isThisInstalled);
   });
+
+  const noAppBanner = document.getElementById('no-supported-app-banner');
+  const noAppTitle = document.getElementById('no-supported-app-title');
+  const noAppDesc = document.getElementById('no-supported-app-desc');
+  if (noAppBanner) {
+    if (!anyInstalled) {
+      noAppBanner.classList.remove('hidden');
+      if (noAppTitle) noAppTitle.textContent = 'No supported AI app is downloaded';
+      if (noAppDesc) {
+        noAppDesc.textContent = 'Download Gemini, ChatGPT, or Claude for Windows to send selections and prompts from Magic Pointer.';
+      }
+      document.querySelectorAll('.m3-download-app-chip').forEach((chip) => chip.classList.remove('hidden'));
+    } else if (!selectedInstalled) {
+      noAppBanner.classList.remove('hidden');
+      const fallbackNames = ['gemini', 'claude', 'chatgpt']
+        .filter((k) => avail[k])
+        .map((k) => getTargetAppDisplayName(k));
+      if (noAppTitle) noAppTitle.textContent = `${appName} Desktop App is not downloaded`;
+      if (noAppDesc) {
+        noAppDesc.textContent = fallbackNames.length > 0
+          ? `Download ${appName} for Windows, or Magic Pointer will automatically use ${fallbackNames[0]}.`
+          : `Download ${appName}, ChatGPT, or Claude for Windows to continue.`;
+      }
+      document.querySelectorAll('.m3-download-app-chip').forEach((chip) => {
+        const dlId = chip.getAttribute('data-download-app');
+        chip.classList.toggle('hidden', avail[dlId] === true);
+      });
+    } else {
+      noAppBanner.classList.add('hidden');
+    }
+  }
 }
 
 function syncPromptBoxMode() {
@@ -3969,6 +4017,15 @@ async function submitPromptToGemini(overridePrompt = null) {
   const finalPrompt = (overridePrompt !== null ? overridePrompt : promptInput.value).trim();
   if (!finalPrompt && state.selectedAOIs.length === 0) return;
 
+  const avail = state.targetAppAvailability || {};
+  const anyInstalled = avail.gemini !== false || avail.claude !== false || avail.chatgpt !== false;
+  if (!anyInstalled) {
+    openFte('wiggle-adjust');
+    setCursorType('select');
+    syncTargetAppUI();
+    return;
+  }
+
   const attachments = state.selectedAOIs
     .filter((a) => a.filePath)
     .map((a) => ({
@@ -5047,6 +5104,17 @@ document.querySelectorAll('.target-app-pill').forEach((pill) => {
   });
 });
 
+document.querySelectorAll('.m3-download-app-chip').forEach((chip) => {
+  chip.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const appId = chip.getAttribute('data-download-app');
+    if (!appId) return;
+    if (api.downloadTargetApp) {
+      await api.downloadTargetApp(appId);
+    }
+  });
+});
+
 if (api.getTargetApp) {
   api.getTargetApp().then((st) => {
     if (st && st.targetApp) {
@@ -5406,6 +5474,10 @@ if (api.onTargetAppChange) {
       state.targetAppAvailability = st.availability;
     }
     syncTargetAppUI();
+    if (st.openNoAppPrompt) {
+      openFte('wiggle-adjust');
+      setCursorType('select');
+    }
   });
 }
 

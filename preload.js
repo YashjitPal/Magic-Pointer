@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('magicPointerAPI', {
   setTheme: (dark) => ipcRenderer.send('magic-pointer:set-theme', dark),
   getTargetApp: () => ipcRenderer.invoke('magic-pointer:get-target-app'),
   setTargetApp: (targetApp) => ipcRenderer.invoke('magic-pointer:set-target-app', targetApp),
+  downloadTargetApp: (appId) => ipcRenderer.invoke('magic-pointer:download-target-app', appId),
   getMagicCueState: () => ipcRenderer.invoke('magic-pointer:get-magic-cue-state'),
   setMagicCueEnabled: (enabled) => ipcRenderer.invoke('magic-pointer:set-magic-cue-enabled', enabled),
   getLlmState: () => ipcRenderer.invoke('magic-pointer:get-llm-state'),

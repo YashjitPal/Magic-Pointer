@@ -765,6 +765,21 @@ ipcMain.handle('magic-pointer:pick-files', async () => {
 });
 
 ipcMain.handle('magic-pointer:send-to-gemini', async (_event, payload) => {
+  const avail = getTargetAppsAvailability();
+  const anyInstalled = !!(avail.gemini || avail.claude || avail.chatgpt);
+  if (!anyInstalled) {
+    // If no supported AI desktop app is downloaded at all, keep Magic Pointer open and
+    // show the top-right Material You Settings card with the "No supported AI app is downloaded" prompt!
+    if (overlayWindow && !overlayWindow.isDestroyed()) {
+      overlayWindow.webContents.send('magic-pointer:target-app', {
+        targetApp,
+        availability: avail,
+        openNoAppPrompt: true
+      });
+    }
+    return { ok: false, noAppInstalled: true, availability: avail };
+  }
+
   deactivateMagicPointer();
 
   const resolvedApp = resolveDefaultOrValidTargetApp((payload && payload.targetApp) || targetApp);
@@ -831,6 +846,36 @@ ipcMain.handle('magic-pointer:set-target-app', async (_event, nextApp) => {
     targetApp,
     availability: getTargetAppsAvailability()
   };
+});
+
+ipcMain.handle('magic-pointer:download-target-app', async (_event, appId) => {
+  deactivateMagicPointer();
+  const id = String(appId || 'gemini').toLowerCase();
+  try {
+    if (id === 'gemini') {
+      const localSetup = path.join(os.homedir(), 'Downloads', 'GeminiSetup.exe');
+      if (fs.existsSync(localSetup)) {
+        await shell.openPath(localSetup);
+        return { ok: true, launchedLocalInstaller: true };
+      }
+      await shell.openExternal('https://gemini.google.com/app');
+      return { ok: true };
+    }
+    if (id === 'claude') {
+      const localClaudeSetup = path.join(os.homedir(), 'Downloads', 'Claude Setup.exe');
+      if (fs.existsSync(localClaudeSetup)) {
+        await shell.openPath(localClaudeSetup);
+        return { ok: true, launchedLocalInstaller: true };
+      }
+      await shell.openExternal('https://claude.ai/download');
+      return { ok: true };
+    }
+    if (id === 'chatgpt') {
+      await shell.openExternal('https://openai.com/chatgpt/desktop/');
+      return { ok: true };
+    }
+  } catch (_) {}
+  return { ok: false };
 });
 
 ipcMain.handle('magic-pointer:get-magic-cue-state', async () => {

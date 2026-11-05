@@ -269,14 +269,41 @@
                 <span class="magic-cue-settings-title">Target AI Desktop App</span>
                 <span id="target-app-badge" class="magic-cue-badge installed">Gemini</span>
               </div>
-              <p class="magic-cue-settings-desc">
+              <p id="target-app-settings-desc" class="magic-cue-settings-desc">
                 Choose which desktop app opens in Companion Window mode when you send a prompt
               </p>
             </div>
-            <div class="target-app-Segmented-row" role="radiogroup" aria-label="Target AI Desktop App">
+            <div id="target-app-segmented-row" class="target-app-Segmented-row" role="radiogroup" aria-label="Target AI Desktop App">
               <button type="button" class="target-app-pill active" data-target-app="gemini">Gemini</button>
               <button type="button" class="target-app-pill" data-target-app="claude">Claude</button>
               <button type="button" class="target-app-pill" data-target-app="chatgpt">ChatGPT</button>
+            </div>
+
+            <!-- Material You Warning Banner when no supported AI Desktop App (or the selected app) is installed -->
+            <div id="no-supported-app-banner" class="no-supported-app-banner hidden" role="alert">
+              <div class="no-supported-app-header">
+                <svg class="no-supported-app-icon" viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                  <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
+                </svg>
+                <span id="no-supported-app-title" class="no-supported-app-title">No supported AI app is downloaded</span>
+              </div>
+              <p id="no-supported-app-desc" class="no-supported-app-desc">
+                Download Gemini, ChatGPT, or Claude for Windows to send selections and prompts from Magic Pointer.
+              </p>
+              <div class="no-supported-app-actions">
+                <button type="button" class="m3-download-app-chip" data-download-app="gemini">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z"/></svg>
+                  <span>Download Gemini</span>
+                </button>
+                <button type="button" class="m3-download-app-chip" data-download-app="chatgpt">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z"/></svg>
+                  <span>Download ChatGPT</span>
+                </button>
+                <button type="button" class="m3-download-app-chip" data-download-app="claude">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z"/></svg>
+                  <span>Download Claude</span>
+                </button>
+              </div>
             </div>
           </div>
 
