@@ -4207,26 +4207,10 @@ window.addEventListener('mouseup', async (e) => {
     // Tap without drag on scrimCanvas (MainScreenKt$mainScreenTapGestures$1$1.java:56651-56706)
     if (state.aoiSelectionMode || state.isCollapsed || state.selectingMoreScreen) {
       if (state.hoveredAoi && state.hoveredAoi.rect && state.selectedAOIs.length < 10) {
-        // Clicking a text block when items are already attached (or holding Ctrl) adds it directly;
-        // when 0 items are attached, show the Copy & Plus circles so text is NEVER attached without showing Copy/Plus first!
+        // MainScreenKt$mainScreenTapGestures$1$1.java:56665-56672:
+        // Clicking (without dragging to select text) automatically adds the hovered block/area as an attachment!
+        // Copy & Plus circles ONLY appear when the user actually drags to select text!
         if (state.hoveredAoi.parsedText && state.hoveredAoi.parsedText.text) {
-          const canShowCopyOnTap =
-            state.selectedAOIs.length === 0 &&
-            !e.ctrlKey &&
-            !state.ctrlPressed;
-          if (canShowCopyOnTap) {
-            const tapBlock = state.hoveredAoi.parsedText;
-            const tapRect = state.hoveredAoi.rect;
-            const tapLineRects = Array.isArray(tapBlock.lines) && tapBlock.lines.length > 0
-              ? tapBlock.lines.map((ln) => ln.boundingBox).filter(Boolean)
-              : [{ left: tapRect.x, top: tapRect.y, right: tapRect.x + tapRect.width, bottom: tapRect.y + tapRect.height, x: tapRect.x, y: tapRect.y, width: tapRect.width, height: tapRect.height }];
-            showTextSelectionActions({
-              text: tapBlock.text.trim(),
-              rect: tapRect,
-              lineRects: tapLineRects
-            });
-            return;
-          }
           await addSelectedTextCardToDraft(state.hoveredAoi.parsedText.text, state.hoveredAoi);
         } else {
           const hRect = state.hoveredAoi.rect;
