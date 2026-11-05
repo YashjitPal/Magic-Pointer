@@ -888,6 +888,61 @@ body.theme-light .suggestion-chip-icon {
 }
 
 /* ============================================================================
+   7b. Page-Wide Text Selection Action Circles (Copy & Plus)
+       - 48dp x 48dp perfect circles (SUGGESTION_CHIP_HEIGHT = 48dp, cornerRadius = 24dp)
+       - Backed by the exact same WebGL2 SuggestionChipConfig EnergyShader!
+       - Placed side-by-side (8dp gap) smartly below or to the right of the selected text
+   ============================================================================ */
+.text-selection-actions {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 12;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.text-sel-circle-btn {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  border-radius: 24px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--on-surface);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: none;
+  transform-origin: 50% 50%;
+  will-change: transform, opacity;
+  pointer-events: auto;
+  transition: background-color 140ms ease;
+}
+
+.text-sel-circle-btn:hover {
+  background: var(--hover-overlay);
+}
+
+.text-sel-circle-content {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  will-change: opacity;
+}
+
+.text-sel-svg {
+  width: 20px;
+  height: 20px;
+  color: var(--on-surface);
+  opacity: 0.88;
+}
+
+/* ============================================================================
    8. Googlebook Native GPointerSnackbarHost (MainScreenStaticValues.smali)
       - Alignment.BottomCenter, SNACKBAR_OUTER_PADDING_BOTTOM = 16dp
       - SNACKBAR_HEIGHT = 48dp, SNACKBAR_ELEVATION = 50dp, Shape = CircleShape

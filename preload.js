@@ -24,6 +24,7 @@ contextBridge.exposeInMainWorld('magicPointerAPI', {
   executeMagicCue: (payload) => ipcRenderer.invoke('magic-pointer:execute-magic-cue', payload),
   cropAOI: (rect) => ipcRenderer.invoke('magic-pointer:crop-aoi', rect),
   saveTextAoi: (payload) => ipcRenderer.invoke('magic-pointer:save-text-aoi', payload),
+  copyText: (text) => ipcRenderer.invoke('magic-pointer:copy-text', text),
   getWindows: () => ipcRenderer.invoke('magic-pointer:get-windows'),
   pickFiles: () => ipcRenderer.invoke('magic-pointer:pick-files'),
   sendToGemini: (payload) => ipcRenderer.invoke('magic-pointer:send-to-gemini', payload),

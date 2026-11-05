@@ -56,6 +56,12 @@ const state = {
   textSelStartY: 0,
   textSelEndX: 0,
   textSelEndY: 0,
+  // Page-wide OCR text selection + floating Copy & Add circle actions
+  pageOcrBlock: null,
+  pageOcrSymbols: [],
+  pendingTextSelection: null, // { text, rect, lineRects }
+  textActionCircles: [], // [{ el, contentEl, index, cx, cy, r, scale, scaleVel, alpha, alphaFromTime, startTime, timeOffsetSec, exiting, exitStart, exitFromAlpha, exitFromScale }]
+  textActionShaderCircles: [],
   hoveredAoi: null,
   renderedHoverAoi: null,
   hoverCardAlpha: 0,
@@ -138,6 +144,10 @@ const screenshotFreezeImg = document.getElementById('screenshot-freeze-img');
 const scrimCanvas = document.getElementById('scrim-canvas');
 const energyCanvas = document.getElementById('energy-shader-canvas');
 const aoiCardsLayer = document.getElementById('aoi-cards-layer');
+const textSelectionActionsEl = document.getElementById('text-selection-actions');
+const btnTextSelCopy = document.getElementById('btn-text-sel-copy');
+const btnTextSelAdd = document.getElementById('btn-text-sel-add');
+const iconTextSelCopy = document.getElementById('icon-text-sel-copy');
 const floatingAnchor = document.getElementById('floating-prompt-anchor');
 const exitActionsPill = document.getElementById('exit-actions-pill');
 const btnCollapseSave = document.getElementById('btn-collapse-save');
@@ -1017,6 +1027,8 @@ function triggerScreenElementSegmentation(screenElementAoi) {
 function processOcrResultIntoTextAOIs(ocrData) {
   if (!ocrData || !Array.isArray(ocrData.lines)) {
     state.ocrTextAOIs = [];
+    state.pageOcrBlock = null;
+    state.pageOcrSymbols = [];
     return;
   }
   const screenH = window.innerHeight;
@@ -1271,6 +1283,29 @@ function processOcrResultIntoTextAOIs(ocrData) {
     parsedText: block
   }));
 
+  // Build unified full-page reading-order OcrTextBlock so the user can drag-select text
+  // indefinitely across the entire page (spanning multiple paragraphs/columns)!
+  const sortedBlocks = [...blocks].sort((a, b) => {
+    const ab = a.boundingBox;
+    const bb = b.boundingBox;
+    const vOverlap = Math.min(ab.bottom, bb.bottom) - Math.max(ab.top, bb.top);
+    if (vOverlap > Math.min(ab.height, bb.height) * 0.25) {
+      return ab.left - bb.left;
+    }
+    return ab.top - bb.top || ab.left - bb.left;
+  });
+  const allPageLines = [];
+  for (const blk of sortedBlocks) {
+    if (Array.isArray(blk.lines)) {
+      allPageLines.push(...blk.lines);
+    }
+  }
+  state.pageOcrBlock = {
+    text: sortedBlocks.map((b) => b.text).join('\n'),
+    lines: allPageLines
+  };
+  state.pageOcrSymbols = flattenOcrSymbols(state.pageOcrBlock);
+
   // Exact port of AOIDetectorImpl$init$processedAllDeferred$1.java:78-83:
   // Send OCR TEXT bounding boxes to visionWorker so EdgeSnapPostProcessor.sideClamps
   // clamps INTERACTABLE boxes from expanding into adjacent OCR text blocks!
@@ -1371,7 +1406,69 @@ function reconstructSelectedOcrText(wrappers) {
   return sb;
 }
 
+function getSelectedTextAndGeometryFromPage(startX, startY, endX, endY) {
+  const textBlock = state.pageOcrBlock || (state.textSelectionAoi && state.textSelectionAoi.parsedText);
+  if (!textBlock || !Array.isArray(textBlock.lines) || !textBlock.lines.length) return null;
+  const symbols = state.pageOcrSymbols && state.pageOcrSymbols.length > 0 ? state.pageOcrSymbols : flattenOcrSymbols(textBlock);
+  if (!symbols.length) return null;
+  const sIdx = getInsertionPointIndexForOcr(symbols, startX, startY);
+  const eIdx = getInsertionPointIndexForOcr(symbols, endX, endY);
+  if (sIdx === eIdx) return null;
+  const minIdx = Math.min(sIdx, eIdx);
+  const maxIdx = Math.max(sIdx, eIdx) - 1;
+  const text = reconstructSelectedOcrText(symbols.slice(minIdx, maxIdx + 1));
+  if (!text || !text.trim()) return null;
+
+  const lineRects = [];
+  let uLeft = Infinity, uTop = Infinity, uRight = -Infinity, uBottom = -Infinity;
+  let lineStartIdx = 0;
+
+  for (const line of textBlock.lines) {
+    const lineSymbols = [];
+    for (const el of line.elements || []) {
+      for (const sym of el.symbols || []) {
+        lineSymbols.push(sym);
+      }
+    }
+    const lineEndIdx = lineStartIdx + lineSymbols.length - 1;
+    const iStart = Math.max(lineStartIdx, minIdx);
+    const iEnd = Math.min(lineEndIdx, maxIdx);
+    if (iStart <= iEnd) {
+      let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+      for (let k = iStart - lineStartIdx; k <= iEnd - lineStartIdx; k++) {
+        const sr = lineSymbols[k] && lineSymbols[k].boundingBox;
+        if (sr) {
+          if (sr.left < left) left = sr.left;
+          if (sr.top < top) top = sr.top;
+          if (sr.right > right) right = sr.right;
+          if (sr.bottom > bottom) bottom = sr.bottom;
+        }
+      }
+      if (left < right && top < bottom) {
+        lineRects.push({ left, top, right, bottom, x: left, y: top, width: right - left, height: bottom - top });
+        if (left < uLeft) uLeft = left;
+        if (top < uTop) uTop = top;
+        if (right > uRight) uRight = right;
+        if (bottom > uBottom) uBottom = bottom;
+      }
+    }
+    lineStartIdx += lineSymbols.length;
+  }
+
+  if (!lineRects.length || uLeft >= uRight || uTop >= uBottom) return null;
+  const rawUnion = {
+    x: uLeft,
+    y: uTop,
+    width: Math.max(8, uRight - uLeft),
+    height: Math.max(8, uBottom - uTop)
+  };
+  const rect = constrainAoiRectToScreen(rawUnion) || rawUnion;
+  return { text, rect, lineRects };
+}
+
 function getSelectedTextFromAoi(aoi, startX, startY, endX, endY) {
+  const pageSel = getSelectedTextAndGeometryFromPage(startX, startY, endX, endY);
+  if (pageSel && pageSel.text) return pageSel.text;
   const textBlock = aoi && aoi.parsedText;
   if (!textBlock) return null;
   const symbols = flattenOcrSymbols(textBlock);
@@ -1712,6 +1809,10 @@ function redrawScrimCanvas() {
   const inSelection = state.aoiSelectionMode || state.isCollapsed || state.selectingMoreScreen || state.isDraggingAOI;
   if (inSelection) {
     const activeDragRect = state.isDraggingAOI ? constrainAoiRectToScreen(getNormalizedDragRect()) : null;
+    const livePageSel = state.isTextSelecting
+      ? getSelectedTextAndGeometryFromPage(state.textSelStartX, state.textSelStartY, state.textSelEndX, state.textSelEndY)
+      : state.pendingTextSelection;
+
     if (activeDragRect && activeDragRect.width > 6 && activeDragRect.height > 6) {
       ctx.globalCompositeOperation = 'destination-out';
       ctx.fillStyle = 'rgba(0, 0, 0, 1)';
@@ -1721,6 +1822,20 @@ function redrawScrimCanvas() {
         activeDragRect.y - 8,
         activeDragRect.width + 16,
         activeDragRect.height + 16,
+        12
+      );
+      ctx.fill();
+    } else if (livePageSel && livePageSel.rect) {
+      // Cutout & highlight the entire selected text area across the page!
+      const sr = livePageSel.rect;
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.fillStyle = 'rgba(0, 0, 0, 1)';
+      drawRoundedRectPath(
+        ctx,
+        sr.x - 8,
+        sr.y - 8,
+        sr.width + 16,
+        sr.height + 16,
         12
       );
       ctx.fill();
@@ -1740,48 +1855,12 @@ function redrawScrimCanvas() {
     }
 
     // TextSelectionOverlay (MainScreenKt.java:57435 & TextSelectionKt.java:80-225):
-    // When dragging across an OCR text block (state.isTextSelecting), draws per-line character highlight boxes
-    // with TEXT_SELECTION_COLOR = MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
-    if (state.isTextSelecting && state.textSelectionAoi && state.textSelectionAoi.parsedText) {
-      const textBlock = state.textSelectionAoi.parsedText;
-      const symbols = flattenOcrSymbols(textBlock);
-      if (symbols.length > 0) {
-        const startInsertion = getInsertionPointIndexForOcr(symbols, state.textSelStartX, state.textSelStartY);
-        const endInsertion = getInsertionPointIndexForOcr(symbols, state.textSelEndX, state.textSelEndY);
-        if (startInsertion !== endInsertion) {
-          const minIdx = Math.min(startInsertion, endInsertion);
-          const maxIdx = Math.max(startInsertion, endInsertion) - 1;
-          ctx.globalCompositeOperation = 'source-over';
-          ctx.fillStyle = state.isDarkMode ? 'rgba(168, 199, 250, 0.30)' : 'rgba(11, 87, 208, 0.30)';
-          let lineStartIdx = 0;
-          for (const line of textBlock.lines || []) {
-            const lineSymbols = [];
-            for (const el of line.elements || []) {
-              for (const sym of el.symbols || []) {
-                lineSymbols.push(sym);
-              }
-            }
-            const lineEndIdx = lineStartIdx + lineSymbols.length - 1;
-            const iStart = Math.max(lineStartIdx, minIdx);
-            const iEnd = Math.min(lineEndIdx, maxIdx);
-            if (iStart <= iEnd) {
-              let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
-              for (let k = iStart - lineStartIdx; k <= iEnd - lineStartIdx; k++) {
-                const sr = lineSymbols[k] && lineSymbols[k].boundingBox;
-                if (sr) {
-                  if (sr.left < left) left = sr.left;
-                  if (sr.top < top) top = sr.top;
-                  if (sr.right > right) right = sr.right;
-                  if (sr.bottom > bottom) bottom = sr.bottom;
-                }
-              }
-              if (left < right && top < bottom) {
-                ctx.fillRect(left, top, right - left, bottom - top);
-              }
-            }
-            lineStartIdx += lineSymbols.length;
-          }
-        }
+    // Draws per-line character highlight boxes across the entire page with TEXT_SELECTION_COLOR = primary.copy(alpha = 0.3f)
+    if (livePageSel && Array.isArray(livePageSel.lineRects) && livePageSel.lineRects.length > 0) {
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.fillStyle = state.isDarkMode ? 'rgba(168, 199, 250, 0.30)' : 'rgba(11, 87, 208, 0.30)';
+      for (const lr of livePageSel.lineRects) {
+        ctx.fillRect(lr.left, lr.top, lr.width, lr.height);
       }
     }
   }
@@ -1819,6 +1898,7 @@ function renderFrame(now) {
   }
 
   tickChipMotions(dt, now);
+  tickTextActionCircles(dt, now);
   tickSnackbarMotion(dt);
 
   // Animate scrimCutOutAlpha (MainScreenKt$scrimCutOutAlpha$1$1.java: tween(300ms, delay = 0 or 300ms, LinearEasing))
@@ -1866,14 +1946,21 @@ function renderFrame(now) {
     //     Expanded by AOI_PADDING_DP = 8dp on each side (+16dp width/height), cornerRadius = 12dp.
     const inSelection = state.aoiSelectionMode || state.isCollapsed || state.selectingMoreScreen;
     const activeDragRect = state.isDraggingAOI ? constrainAoiRectToScreen(getNormalizedDragRect()) : null;
-    if (activeDragRect && activeDragRect.width > 6 && activeDragRect.height > 6) {
+    const livePageSelRect = state.isTextSelecting
+      ? (getSelectedTextAndGeometryFromPage(state.textSelStartX, state.textSelStartY, state.textSelEndX, state.textSelEndY) || {}).rect
+      : state.pendingTextSelection && state.pendingTextSelection.rect;
+    const activeHighlightRect = activeDragRect && activeDragRect.width > 6 && activeDragRect.height > 6
+      ? activeDragRect
+      : livePageSelRect;
+
+    if (activeHighlightRect && activeHighlightRect.width > 6 && activeHighlightRect.height > 6) {
       drawEnergyShape({
         baseTimeSec: t,
         timeOffsetSec: 1500.0,
-        cx: (activeDragRect.x + activeDragRect.width * 0.5) * dpr,
-        cy: (activeDragRect.y + activeDragRect.height * 0.5) * dpr,
-        w: (activeDragRect.width + 16) * dpr,
-        h: (activeDragRect.height + 16) * dpr,
+        cx: (activeHighlightRect.x + activeHighlightRect.width * 0.5) * dpr,
+        cy: (activeHighlightRect.y + activeHighlightRect.height * 0.5) * dpr,
+        w: (activeHighlightRect.width + 16) * dpr,
+        h: (activeHighlightRect.height + 16) * dpr,
         r: 12.0 * dpr,
         spread: 64.0 * dpr,
         panelAlpha: 0.0,
@@ -2058,6 +2145,99 @@ function renderFrame(now) {
           w: cw * dpr,
           h: ch * dpr,
           r: cr * dpr,
+          spread: spread * dpr,
+          panelAlpha: alphaMul,
+          panelTopBlur: panelTopBlur * dpr,
+          panelBottomBlur: panelBottomBlur * dpr,
+          panelColor: panelCol,
+          spotLightAlpha: 0.0,
+          borderAlpha1: borderAlpha1 * alphaMul,
+          color1: borderSurfaceCol,
+          stroke1: 2.0 * dpr,
+          topBlur1: topBlur1 * dpr,
+          bottomBlur1: bottomBlur1 * dpr,
+          topIntensity1: topIntensity1,
+          bottomIntensity1: bottomIntensity1,
+          borderDistSpeed1: 0.0,
+          borderDistFreq1: 0.0,
+          borderDistAmp1: 0.0,
+          borderAlpha2: 0.0,
+          color2: borderSurfaceCol,
+          stroke2: 0.0,
+          topBlur2: 1.0,
+          bottomBlur2: 1.0,
+          topIntensity2: 0.0,
+          bottomIntensity2: 0.0,
+          dotsColor: primaryDotsCol,
+          dotsAlpha: dotsAlpha * alphaMul,
+          dotsGrid: 3.0 * dpr,
+          dotsMaxRadius: dotsMaxRadius,
+          dotsMinRadius: -0.07,
+          dotsBlurRadius: 0.3,
+          dotsMoveStrength: 5.0,
+          dotsInnerStroke: dotsInnerStroke * dpr,
+          dotsOuterStroke: dotsOuterStroke * dpr,
+          dotsWaveAmp: dotsWaveAmp * dpr,
+          dotsWaveFreq: 0.02,
+          dotsWaveSpeed: 9.0,
+          dotsYGradWeight: dotsYGrad
+        });
+      }
+    }
+
+    // 3c. Page-Wide Text Selection Action Circles (Copy & Add to Gemini):
+    //     Uses the exact same 3-stage SuggestionChipConfig EnergyShader as suggestion chips,
+    //     rendered on 48x48dp perfect circles (r = 24dp)!
+    if (state.textActionShaderCircles && state.textActionShaderCircles.length > 0) {
+      for (const circle of state.textActionShaderCircles) {
+        const age = Math.max(0, now - (circle.startTime || now));
+        let spread, panelTopBlur, panelBottomBlur;
+        let borderAlpha1, topBlur1, bottomBlur1, topIntensity1, bottomIntensity1;
+        let dotsAlpha, dotsMaxRadius, dotsInnerStroke, dotsOuterStroke, dotsWaveAmp, dotsYGrad;
+
+        if (age <= 800) {
+          const p = (age + 600.0) / 1400.0;
+          spread = 64.0;
+          panelTopBlur = lerp(38.0, 0.0, p);
+          panelBottomBlur = lerp(3.0, 0.0, p);
+          borderAlpha1 = lerp(0.0, 1.0, p);
+          topBlur1 = 35.0;
+          bottomBlur1 = 10.0;
+          topIntensity1 = 0.25;
+          bottomIntensity1 = 0.25;
+          dotsAlpha = lerp(1.0, 0.4, p);
+          dotsMaxRadius = lerp(0.3, 0.4, p);
+          dotsInnerStroke = lerp(20.0, 16.2, p);
+          dotsOuterStroke = 50.0;
+          dotsWaveAmp = lerp(3.0, 0.0, p);
+          dotsYGrad = lerp(-0.25, -1.0, p);
+        } else {
+          const p = Math.min(1.0, (age - 800.0) / 1200.0);
+          spread = lerp(64.0, 0.0, p);
+          panelTopBlur = 0.0;
+          panelBottomBlur = 0.0;
+          borderAlpha1 = 1.0;
+          topBlur1 = lerp(35.0, 7.0, p);
+          bottomBlur1 = lerp(10.0, 35.0, p);
+          topIntensity1 = lerp(0.25, 0.0, p);
+          bottomIntensity1 = lerp(0.25, 0.15, p);
+          dotsAlpha = lerp(0.4, 0.0, p);
+          dotsMaxRadius = lerp(0.4, 0.0, p);
+          dotsInnerStroke = lerp(16.2, 0.0, p);
+          dotsOuterStroke = lerp(50.0, 0.0, p);
+          dotsWaveAmp = 0.0;
+          dotsYGrad = lerp(-1.0, 0.0, p);
+        }
+
+        const alphaMul = circle.alpha ?? 1.0;
+        drawEnergyShape({
+          baseTimeSec: t,
+          timeOffsetSec: 1500.0 + (circle.timeOffsetSec || 0.0) * 100.0,
+          cx: circle.cx * dpr,
+          cy: circle.cy * dpr,
+          w: circle.w * dpr,
+          h: circle.h * dpr,
+          r: circle.r * dpr,
           spread: spread * dpr,
           panelAlpha: alphaMul,
           panelTopBlur: panelTopBlur * dpr,
@@ -2556,6 +2736,196 @@ function tickChipMotions(dtMs, now) {
     }
   }
   state.cachedChipOffsets = glow;
+}
+
+// ============================================================================
+// 5d. Page-Wide Text Selection Action Circles (Copy & Add to Gemini)
+//     - 48dp x 48dp perfect circles backed by SuggestionChipConfig EnergyShader
+//     - Smartly placed side-by-side (8dp gap) either below or to the right of the selection
+//     - Smooth spring/fade-in entry and 150ms fade-out exit
+// ============================================================================
+const COPY_ICON_PATH_DEFAULT = 'M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z';
+const COPY_ICON_PATH_CHECK = 'M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z';
+
+function clearTextSelectionActionsImmediate() {
+  state.pendingTextSelection = null;
+  state.textActionCircles = [];
+  state.textActionShaderCircles = [];
+  if (textSelectionActionsEl) {
+    textSelectionActionsEl.classList.add('hidden');
+  }
+  if (iconTextSelCopy) {
+    const p = iconTextSelCopy.querySelector('path');
+    if (p) p.setAttribute('d', COPY_ICON_PATH_DEFAULT);
+  }
+  state.scrimDirty = true;
+}
+
+function dismissTextSelectionActions(animated = true, onDone = null) {
+  if (!state.textActionCircles.length) {
+    clearTextSelectionActionsImmediate();
+    if (onDone) onDone();
+    return;
+  }
+  if (!animated) {
+    clearTextSelectionActionsImmediate();
+    if (onDone) onDone();
+    return;
+  }
+  const now = performance.now();
+  for (const c of state.textActionCircles) {
+    if (!c.exiting) {
+      c.exiting = true;
+      c.exitStart = now;
+      c.exitFromScale = c.scale;
+      c.exitFromAlpha = c.alpha;
+    }
+  }
+  setTimeout(() => {
+    clearTextSelectionActionsImmediate();
+    if (onDone) onDone();
+  }, 150);
+}
+
+function showTextSelectionActions(selectionObj) {
+  if (!selectionObj || !selectionObj.rect || !selectionObj.text || !textSelectionActionsEl) return;
+  state.pendingTextSelection = selectionObj;
+  state.scrimDirty = true;
+
+  if (iconTextSelCopy) {
+    const p = iconTextSelCopy.querySelector('path');
+    if (p) p.setAttribute('d', COPY_ICON_PATH_DEFAULT);
+  }
+
+  const r = selectionObj.rect;
+  const screenW = window.innerWidth;
+  const screenH = window.innerHeight;
+  const margin = 16;
+  const gap = 8;
+  const circleSize = 48;
+  const groupW = circleSize * 2 + gap; // 104px
+  const groupH = circleSize;           // 48px
+  // Card visual border has 8px padding outside `r`
+  const cardRight = r.x + r.width + 8;
+  const cardBottom = r.y + r.height + 8;
+  const cardTop = r.y - 8;
+
+  const spaceBelow = screenH - margin - cardBottom;
+  const spaceRight = screenW - margin - cardRight;
+
+  let groupX, groupY;
+  // Smartly place either below the selected text or to the right of the selected text based on available space
+  if (spaceBelow >= groupH + 14 || spaceRight < groupW + 14) {
+    if (spaceBelow >= groupH + 14) {
+      // Below the selected text, right-aligned with the selection (or clamped within screen bounds)
+      groupX = Math.max(margin, Math.min(r.x + r.width - groupW, screenW - margin - groupW));
+      groupY = Math.min(screenH - margin - groupH, cardBottom + 12);
+    } else if (cardTop - margin >= groupH + 14) {
+      // Above the selected text if near bottom of screen and no room on right
+      groupX = Math.max(margin, Math.min(r.x + r.width - groupW, screenW - margin - groupW));
+      groupY = Math.max(margin, cardTop - 12 - groupH);
+    } else {
+      groupX = Math.max(margin, Math.min(r.x + r.width - groupW, screenW - margin - groupW));
+      groupY = Math.max(margin, Math.min(cardBottom - groupH - 8, screenH - margin - groupH));
+    }
+  } else {
+    // To the right of the selected text, vertically aligned with the bottom of the selection
+    groupX = Math.min(screenW - margin - groupW, cardRight + 12);
+    groupY = Math.max(margin, Math.min(r.y + r.height - groupH, screenH - margin - groupH));
+  }
+
+  textSelectionActionsEl.style.transform = `translate3d(${groupX.toFixed(1)}px, ${groupY.toFixed(1)}px, 0)`;
+  textSelectionActionsEl.classList.remove('hidden');
+
+  const now = performance.now();
+  const btns = [btnTextSelCopy, btnTextSelAdd];
+  state.textActionCircles = btns.map((btn, i) => {
+    const contentEl = btn.querySelector('.text-sel-circle-content');
+    btn.style.opacity = '0';
+    btn.style.transform = 'scale(0.25)';
+    if (contentEl) contentEl.style.opacity = '0';
+    return {
+      el: btn,
+      contentEl,
+      index: i,
+      baseX: groupX + i * (circleSize + gap),
+      baseY: groupY,
+      size: circleSize,
+      delayUntil: now + i * 45,
+      started: false,
+      exiting: false,
+      scale: 0.25,
+      scaleVel: 0,
+      alpha: 0,
+      alphaFromTime: now,
+      timeOffsetSec: ((i * 4.13 + Math.random() * 5.87) % 10.0)
+    };
+  });
+
+  // Position the floating prompt box neatly so it doesn't overlap the two action circles
+  updateFloatingPromptBoxPosition(groupX + groupW + 16, groupY + groupH * 0.5, true);
+}
+
+function tickTextActionCircles(dtMs, now) {
+  const circles = state.textActionCircles;
+  if (!circles || !circles.length) {
+    state.textActionShaderCircles = [];
+    return;
+  }
+  const dt = Math.min(0.05, dtMs / 1000);
+  const shaderList = [];
+  for (let i = 0; i < circles.length; i++) {
+    const c = circles[i];
+    if (c.exiting) {
+      const p = Math.min(1, (now - c.exitStart) / 150);
+      const easeP = emphasizedAccelerate(p);
+      c.scale = c.exitFromScale * (1 - 0.75 * easeP);
+      const fadeP = Math.min(1, (now - c.exitStart) / 120);
+      c.alpha = c.exitFromAlpha * (1 - fadeP);
+    } else if (now < c.delayUntil) {
+      c.alpha = 0;
+      c.scale = 0.25;
+    } else {
+      if (!c.started) {
+        c.started = true;
+        c.scale = 0.25;
+        c.scaleVel = 0;
+        c.alpha = 0;
+        c.alphaFromTime = now;
+      }
+      const sp = stepSpring(c.scale, c.scaleVel, 1, dt, SLOW_SPATIAL.damping, SLOW_SPATIAL.stiffness);
+      c.scale = sp.value;
+      c.scaleVel = sp.velocity;
+      c.alpha = Math.min(1, (now - c.alphaFromTime) / 90);
+    }
+
+    if (c.el) {
+      c.el.style.opacity = String(c.alpha);
+      c.el.style.transform = `scale(${c.scale.toFixed(4)})`;
+    }
+    if (c.contentEl) {
+      const visualD = c.scale * c.size;
+      let iconAlpha = 0;
+      if (visualD >= c.size) iconAlpha = 1;
+      else if (visualD > CHIP_ALPHA_MIN_H) iconAlpha = (visualD - CHIP_ALPHA_MIN_H) / (c.size - CHIP_ALPHA_MIN_H);
+      c.contentEl.style.opacity = String(iconAlpha * c.alpha);
+    }
+
+    if (c.alpha > 0.03) {
+      const curSize = Math.max(8, c.size * c.scale);
+      shaderList.push({
+        cx: c.baseX + c.size * 0.5,
+        cy: c.baseY + c.size * 0.5,
+        w: curSize,
+        h: curSize,
+        r: curSize * 0.5,
+        alpha: c.alpha,
+        startTime: c.alphaFromTime,
+        timeOffsetSec: c.timeOffsetSec || 0.0
+      });
+    }
+  }
+  state.textActionShaderCircles = shaderList;
 }
 
 function setExpandedState(expanded, opts = {}) {
@@ -3481,6 +3851,7 @@ function updateCursorTypeForTarget(target) {
   } else if (
     target &&
     (target.closest('#floating-prompt-anchor') ||
+      target.closest('#text-selection-actions') ||
       target.closest('#bottom-snackbar') ||
       target.closest('.bottom-left-feedback-wrap') ||
       target.closest('#shake-intervention-backdrop') ||
@@ -3563,6 +3934,9 @@ scrimCanvas.addEventListener('mousedown', (e) => {
   if (e.button !== 0) return;
 
   onUserInteraction();
+  if (state.pendingTextSelection) {
+    dismissTextSelectionActions(true);
+  }
   state.isPointerDownOnScrim = true;
   state.isDraggingAOI = false;
   state.isTextSelecting = false;
@@ -3606,28 +3980,17 @@ window.addEventListener('mouseup', async (e) => {
   state.scrimDirty = true;
 
   if (wasTextSelecting && textAoi) {
-    // MainScreenKt$mainScreenDragGestures$1.java:56977-56985:
-    // selectedText = TextSelectionKt.getSelectedText(currentAoi, selectionStartOffset, selectionEndOffset)
-    const selectedText = getSelectedTextFromAoi(
-      textAoi,
+    // Full-page OCR text selection: allows selecting text indefinitely across the entire page!
+    // Once released, highlights the entire selected text area with the AoiCard shader and shows
+    // the two circular Copy & Plus (+) action buttons next to the selection!
+    const pageSel = getSelectedTextAndGeometryFromPage(
       state.textSelStartX,
       state.textSelStartY,
       state.textSelEndX,
       state.textSelEndY
     );
-    if (selectedText && selectedText.trim()) {
-      await addSelectedTextCardToDraft(selectedText, textAoi);
-      state.selectingMoreScreen = false;
-      updateFloatingPromptBoxPosition(e.clientX, e.clientY, true);
-      if (e.ctrlKey || state.ctrlPressed) {
-        state.multiAoiSelectionMode = true;
-        setExpandedState(false, { toFan: true });
-      } else {
-        state.multiAoiSelectionMode = false;
-        const wasCollapsedFan = state.isCollapsed;
-        setExpandedState(true, { skipFanAnim: wasCollapsedFan });
-      }
-      renderScreenAOICards();
+    if (pageSel && pageSel.text && pageSel.text.trim()) {
+      showTextSelectionActions(pageSel);
     }
     floatingAnchor.classList.remove('dragging-active');
     return;
@@ -3672,11 +4035,19 @@ window.addEventListener('mouseup', async (e) => {
     if (state.aoiSelectionMode || state.isCollapsed || state.selectingMoreScreen) {
       if (state.hoveredAoi && state.hoveredAoi.rect && state.selectedAOIs.length < 10) {
         // MainScreenKt$mainScreenTapGestures$1$1.java:56665-56672:
-        // OcrTextBlock textBlock = currentAoi.getParsedText();
-        // if (textBlock != null) peer.addSelectedText(textBlock.getText(), currentAoi);
-        // else peer.addSelectedAOI(currentAoi);
+        // If clicking a text block, highlight the text block and show the Copy & Plus (+) action circles!
         if (state.hoveredAoi.parsedText && state.hoveredAoi.parsedText.text) {
-          await addSelectedTextCardToDraft(state.hoveredAoi.parsedText.text, state.hoveredAoi);
+          const blk = state.hoveredAoi.parsedText;
+          const lineRects = (blk.lines || [])
+            .map((l) => l.boundingBox)
+            .filter(Boolean);
+          showTextSelectionActions({
+            text: blk.text,
+            rect: state.hoveredAoi.rect,
+            lineRects
+          });
+          floatingAnchor.classList.remove('dragging-active');
+          return;
         } else {
           const hRect = state.hoveredAoi.rect;
           const crop = await api.cropAOI(hRect);
@@ -3789,12 +4160,62 @@ function hideM3Tooltip() {
   m3PlainTooltip.classList.add('hidden');
 }
 
-[btnAddContent, btnAddAoiTile, btnCollapseSave, btnClearClose, btnSendPrompt].forEach((btn) => {
+[btnAddContent, btnAddAoiTile, btnCollapseSave, btnClearClose, btnSendPrompt, btnTextSelCopy, btnTextSelAdd].forEach((btn) => {
   if (!btn) return;
   btn.addEventListener('mouseenter', () => showM3Tooltip(btn));
   btn.addEventListener('mouseleave', hideM3Tooltip);
   btn.addEventListener('mousedown', hideM3Tooltip);
 });
+
+if (btnTextSelCopy) {
+  btnTextSelCopy.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    onUserInteraction();
+    const sel = state.pendingTextSelection;
+    if (!sel || !sel.text) return;
+    const textToCopy = sel.text;
+    try {
+      if (api.copyText) {
+        await api.copyText(textToCopy);
+      } else if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(textToCopy);
+      }
+    } catch (_) {}
+
+    if (iconTextSelCopy) {
+      const p = iconTextSelCopy.querySelector('path');
+      if (p) p.setAttribute('d', COPY_ICON_PATH_CHECK);
+    }
+    setTimeout(() => {
+      dismissTextSelectionActions(true);
+    }, 120);
+  });
+}
+
+if (btnTextSelAdd) {
+  btnTextSelAdd.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    onUserInteraction();
+    const sel = state.pendingTextSelection;
+    if (!sel || !sel.text) return;
+    const textToAdd = sel.text;
+    const selRect = sel.rect;
+
+    dismissTextSelectionActions(true);
+    await addSelectedTextCardToDraft(textToAdd, { rect: selRect });
+    state.selectingMoreScreen = false;
+    updateFloatingPromptBoxPosition(e.clientX, e.clientY, true);
+    if (e.ctrlKey || state.ctrlPressed) {
+      state.multiAoiSelectionMode = true;
+      setExpandedState(false, { toFan: true });
+    } else {
+      state.multiAoiSelectionMode = false;
+      const wasCollapsedFan = state.isCollapsed;
+      setExpandedState(true, { skipFanAnim: wasCollapsedFan });
+    }
+    renderScreenAOICards();
+  });
+}
 
 promptBox.addEventListener('click', () => {
   onUserInteraction();
@@ -4024,6 +4445,10 @@ function closeTopDialog() {
 function handleEscapePressed() {
   if (!state.active || state.isExiting) return;
   if (closeTopDialog()) return;
+  if (state.pendingTextSelection) {
+    dismissTextSelectionActions(true);
+    return;
+  }
   if ((state.aoiSelectionMode || state.isCollapsed) && state.selectedAOIs.length > 0) {
     // MainActivityPeer.java:1920: if in selection mode with selected AOIs, Esc returns to ExpandedState!
     state.selectingMoreScreen = false;
@@ -4423,6 +4848,9 @@ function activateOverlay(data) {
     // so stale rectangles from an older screen or scroll position NEVER appear!
     visionWorkerSeq++;
     state.ocrTextAOIs = [];
+    state.pageOcrBlock = null;
+    state.pageOcrSymbols = [];
+    clearTextSelectionActionsImmediate();
     state.raidScreenElementAOIs = [];
     state.segmentedScreenElements.clear();
     for (const timerId of state.segmentingScreenElementTimers.values()) {
@@ -4534,9 +4962,10 @@ function activateOverlay(data) {
       syncPromptBoxMode();
       clearSuggestionChips();
       syncIdleExitHintTimer();
-      // Exact port of PromptBoxKt$ExpandedState$3$1.java:44-53:
-      // Auto-focus the text field after 350ms so the user can directly start typing a prompt
-      // without selecting an image first!
+      // Focus the text field immediately (and again at 350ms matching PromptBoxKt$ExpandedState$3$1.java)
+      // so the user can directly start typing a prompt without selecting an image first!
+      if (api.focusOverlay) api.focusOverlay();
+      promptInput.focus({ preventScroll: true });
       setTimeout(() => {
         if (state.active && !state.isCollapsed && !state.isDraggingAOI && !state.isTextSelecting) {
           if (api.focusOverlay) api.focusOverlay();
@@ -4604,6 +5033,9 @@ api.onDeactivate(() => {
   state.active = false;
   visionWorkerSeq++;
   state.ocrTextAOIs = [];
+  state.pageOcrBlock = null;
+  state.pageOcrSymbols = [];
+  clearTextSelectionActionsImmediate();
   state.raidScreenElementAOIs = [];
   state.segmentedScreenElements.clear();
   for (const timerId of state.segmentingScreenElementTimers.values()) {

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain, dialog, screen, nativeImage, nativeTheme, shell } = require('electron');
+const { app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain, dialog, screen, nativeImage, nativeTheme, shell, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -267,9 +267,12 @@ function activateMagicPointer(rawX, rawY, source = 'shake') {
   overlayWindow.setBounds({ x, y, width, height });
   overlayWindow.setIgnoreMouseEvents(false);
   overlayWindow.setAlwaysOnTop(true, 'screen-saver', 1);
-  // Show without stealing OS focus from Chrome/YouTube/Twitter so hardware video planes and
-  // focus-dependent web players don't pause or blank out when the pointer appears!
-  overlayWindow.showInactive();
+  // Now that the frozen screenshot layer (<img id="screenshot-freeze-img">) is captured BEFORE
+  // the overlay appears, we can immediately give OS keyboard focus to the overlay window so
+  // the user can start typing a prompt right away without selecting an image first!
+  overlayWindow.show();
+  overlayWindow.focus();
+  sendWatcherCommand('FOCUS');
 
   overlayWindow.webContents.send('magic-pointer:activate', {
     x: dipCursor.x,
@@ -580,6 +583,7 @@ ipcMain.on('magic-pointer:dismiss', () => {
 ipcMain.on('magic-pointer:focus-overlay', () => {
   if (overlayWindow && !overlayWindow.isDestroyed() && isMagicPointerActive) {
     overlayWindow.focus();
+    sendWatcherCommand('FOCUS');
   }
 });
 
@@ -606,6 +610,15 @@ ipcMain.handle('magic-pointer:save-text-aoi', async (_event, payload) => {
     return { filePath: outPath, dataUrl: payload.dataUrl };
   } catch (_) {
     return null;
+  }
+});
+
+ipcMain.handle('magic-pointer:copy-text', async (_event, text) => {
+  try {
+    clipboard.writeText(String(text || ''));
+    return { ok: true };
+  } catch (_) {
+    return { ok: false };
   }
 });
 

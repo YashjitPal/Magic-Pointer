@@ -21,6 +21,22 @@
     <!-- Selected AOI Cards overlay layer -->
     <div id="aoi-cards-layer" class="aoi-cards-layer"></div>
 
+    <!-- Floating Page-Wide Text Selection Action Circles (Copy & Add to Gemini, rendered with SuggestionChip EnergyShader!) -->
+    <div id="text-selection-actions" class="text-selection-actions hidden">
+      <button id="btn-text-sel-copy" class="text-sel-circle-btn" data-tooltip="Copy text" aria-label="Copy text" type="button">
+        <span class="text-sel-circle-content">
+          <svg id="icon-text-sel-copy" class="text-sel-svg" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+            <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/>
+          </svg>
+        </span>
+      </button>
+      <button id="btn-text-sel-add" class="text-sel-circle-btn" data-tooltip="Add to Gemini" aria-label="Add to Gemini" type="button">
+        <span class="text-sel-circle-content">
+          <img src="extracted_assets/svg/ic_add_24.svg" alt="Add to Gemini" class="icon-svg icon-variant" />
+        </span>
+      </button>
+    </div>
+
     <!-- Detached Floating PromptBox Wrapper (MainScreen.kt -> PromptBox.kt) -->
     <div id="floating-prompt-anchor" class="floating-prompt-anchor" data-testid="prompt">
       <!-- ExpandedState (PromptBoxKt.smali lines 21500-22230: Column spacedBy 8dp -> PromptBox + SuggestionChips) -->

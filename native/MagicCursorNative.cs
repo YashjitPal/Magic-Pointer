@@ -38,6 +38,21 @@ namespace MagicCursorNative
         static extern bool SetForegroundWindow(IntPtr hWnd);
 
         [DllImport("user32.dll")]
+        static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+        [DllImport("user32.dll")]
+        static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
+        [DllImport("kernel32.dll")]
+        static extern uint GetCurrentThreadId();
+
+        [DllImport("user32.dll")]
+        static extern bool BringWindowToTop(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
         static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
         [DllImport("user32.dll")]
@@ -205,7 +220,36 @@ namespace MagicCursorNative
             try
             {
                 Rectangle bounds = Screen.PrimaryScreen.Bounds;
-                SetWindowPos(OverlayHwnd, HWND_TOPMOST, bounds.Left, bounds.Top, bounds.Width, bounds.Height, SWP_SHOWWINDOW | SWP_NOACTIVATE);
+                SetWindowPos(OverlayHwnd, HWND_TOPMOST, bounds.Left, bounds.Top, bounds.Width, bounds.Height, SWP_SHOWWINDOW);
+                ForceOverlayForegroundFocus();
+            }
+            catch { }
+        }
+
+        static void ForceOverlayForegroundFocus()
+        {
+            if (OverlayHwnd == IntPtr.Zero) return;
+            try
+            {
+                IntPtr fgHwnd = GetForegroundWindow();
+                if (fgHwnd != OverlayHwnd)
+                {
+                    uint dummyPid;
+                    uint fgThread = GetWindowThreadProcessId(fgHwnd, out dummyPid);
+                    uint curThread = GetCurrentThreadId();
+                    if (fgThread != 0 && fgThread != curThread)
+                    {
+                        AttachThreadInput(curThread, fgThread, true);
+                        SetForegroundWindow(OverlayHwnd);
+                        BringWindowToTop(OverlayHwnd);
+                        AttachThreadInput(curThread, fgThread, false);
+                    }
+                    else
+                    {
+                        SetForegroundWindow(OverlayHwnd);
+                        BringWindowToTop(OverlayHwnd);
+                    }
+                }
             }
             catch { }
         }
@@ -838,6 +882,10 @@ namespace MagicCursorNative
                                 OverlayHwnd = new IntPtr(val);
                                 EnforceFullScreenOverlayBounds();
                             }
+                        }
+                        else if (line == "FOCUS")
+                        {
+                            ForceOverlayForegroundFocus();
                         }
                         else if (line == "SNAPSHOT")
                         {
