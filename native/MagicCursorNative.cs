@@ -297,8 +297,10 @@ namespace MagicCursorNative
         const byte VK_S = 0x53;        // S
         const byte VK_LWIN = 0x5B;     // Left Windows key
         const byte VK_RWIN = 0x5C;     // Right Windows key
+        const byte VK_A = 0x41;
         const byte VK_G = 0x47;
         const byte VK_V = 0x56;
+        const byte VK_BACK = 0x08;
 
         [StructLayout(LayoutKind.Sequential)]
         public struct POINT
@@ -1369,6 +1371,25 @@ namespace MagicCursorNative
             keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
         }
 
+        static void SendSelectAllAndClearComposer()
+        {
+            // Select any leftover draft text inside the target AI app's composer (`Ctrl + A`)
+            // and clear it (`Backspace`) so the new prompt from Magic Pointer is never appended
+            // onto old leftover text!
+            keybd_event(VK_CONTROL, 0, 0, UIntPtr.Zero);
+            Thread.Sleep(14);
+            keybd_event(VK_A, 0, 0, UIntPtr.Zero);
+            Thread.Sleep(14);
+            keybd_event(VK_A, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            Thread.Sleep(14);
+            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            Thread.Sleep(18);
+            keybd_event(VK_BACK, 0, 0, UIntPtr.Zero);
+            Thread.Sleep(14);
+            keybd_event(VK_BACK, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            Thread.Sleep(20);
+        }
+
         static void SendEnterKey()
         {
             keybd_event(VK_RETURN, 0, 0, UIntPtr.Zero);
@@ -1722,6 +1743,9 @@ namespace MagicCursorNative
                 if (fgThread != 0 && fgThread != curThread) AttachThreadInput(curThread, fgThread, false);
 
                 // 2. Click inside the prompt composer area in the bottom-center of the companion window.
+                //    Wait 60ms after SetWindowPos before clicking so Chromium's WebContentsView has finished
+                //    reflowing to the new companion dimensions!
+                Thread.Sleep(60);
                 RECT r;
                 if (GetWindowRect(appHwnd, out r))
                 {
@@ -1733,13 +1757,13 @@ namespace MagicCursorNative
                         GetCursorPos(out origPt);
 
                         int clickX = r.Left + (w / 2);
-                        int clickY = r.Bottom - Math.Max(76, (int)Math.Round(h * 0.11));
+                        int clickY = r.Bottom - Math.Max(78, (int)Math.Round(h * 0.11));
                         Cursor.Position = new System.Drawing.Point(clickX, clickY);
-                        Thread.Sleep(8);
-                        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
-                        Thread.Sleep(6);
-                        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
                         Thread.Sleep(15);
+                        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+                        Thread.Sleep(12);
+                        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+                        Thread.Sleep(25);
 
                         Cursor.Position = new System.Drawing.Point(origPt.X, origPt.Y);
                     }
@@ -1871,14 +1895,26 @@ namespace MagicCursorNative
             IntPtr aiHwnd = OpenAndPositionAiDesktopApp(targetApp);
             if (aiHwnd == IntPtr.Zero) return;
 
-            // Focus the composer input after resizing and wait 60ms for WebContentsView focus to settle
+            // Focus the composer input after resizing and clear any leftover draft text inside the target app's input box!
             ClickAndFocusComposerInput(aiHwnd, targetApp);
-            Thread.Sleep(60);
+            SendSelectAllAndClearComposer();
 
             bool hasAttachments = (imageFiles.Count > 0 || otherFiles.Count > 0);
             List<string> allAttachmentFiles = new List<string>();
             allAttachmentFiles.AddRange(imageFiles);
             allAttachmentFiles.AddRange(otherFiles);
+
+            // IMPORTANT: Paste the text prompt FIRST while the composer textarea is 100% focused and clean
+            // (before pasting images, which in Gemini/Claude can shift DOM focus onto the attachment preview chip!).
+            if (!string.IsNullOrWhiteSpace(prompt))
+            {
+                SetClipboardTextRetry(prompt);
+                Thread.Sleep(35);
+                SendCtrlV();
+                // Wait 140ms so the target app's renderer finishes reading the text from the clipboard
+                // before we put the image/files onto the clipboard!
+                Thread.Sleep(140);
+            }
 
             if (allAttachmentFiles.Count > 0)
             {
@@ -1892,8 +1928,7 @@ namespace MagicCursorNative
                         }
                         Thread.Sleep(35);
                         SendCtrlV();
-                        // Give Chromium 260ms to finish reading the clipboard bitmap before overwriting the clipboard with text!
-                        Thread.Sleep(260);
+                        Thread.Sleep(320);
                     }
                     else
                     {
@@ -1902,32 +1937,23 @@ namespace MagicCursorNative
                         SetClipboardFileDropListRetry(sc);
                         Thread.Sleep(35);
                         SendCtrlV();
-                        Thread.Sleep(280);
+                        Thread.Sleep(340);
                     }
                 }
                 catch { }
             }
 
-            if (!string.IsNullOrWhiteSpace(prompt))
+            // Ensure the composer has focus and press Enter to submit!
+            if (hasAttachments)
             {
-                SetClipboardTextRetry(prompt);
-                Thread.Sleep(45);
                 ClickAndFocusComposerInput(aiHwnd, targetApp);
-                Thread.Sleep(30);
-                SendCtrlV();
-                Thread.Sleep(hasAttachments ? 320 : 120);
                 SendEnterKey();
-                if (hasAttachments)
-                {
-                    Thread.Sleep(550);
-                    SendEnterKey();
-                }
-            }
-            else if (hasAttachments)
-            {
-                Thread.Sleep(320);
-                SendEnterKey();
+                // Follow-up Enter in case the image upload spinner was still active on the first Enter
                 Thread.Sleep(550);
+                SendEnterKey();
+            }
+            else if (!string.IsNullOrWhiteSpace(prompt))
+            {
                 SendEnterKey();
             }
         }
