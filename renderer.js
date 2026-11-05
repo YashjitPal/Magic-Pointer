@@ -829,11 +829,19 @@ function refreshCachedLayoutMetrics() {
     let chipsH = 0;
     if (!suggestionChipsContainer.classList.contains('hidden') && state.chipMotions.length > 0) {
       chipsW = suggestionChipsContainer.offsetWidth || 0;
-      chipsH = (state.chipMotions.length - 1) * CHIP_STRIDE + CHIP_HEIGHT;
-    } else if (state.expanded && !state.isCollapsed && state.selectedAOIs.length > 0) {
-      // Reserve vertical space for the 3 suggestion chips immediately when expanded with selected AOIs,
-      // even while the On-Device AI model is still generating them, so the PromptBox appears directly
-      // at its final clamped position and NEVER jumps upward once the chips finish generating!
+      const actualCount = state.chipMotions.length;
+      const expectedTotalCount = (state.selectedAOIs.length > 0 && state.llmSuggestionsEnabled && state.llmModelDownloaded)
+        ? Math.max(actualCount, 3)
+        : actualCount;
+      chipsH = (expectedTotalCount - 1) * CHIP_STRIDE + CHIP_HEIGHT;
+    } else if (
+      (state.expanded || state.fanTransitioning) &&
+      (!state.isCollapsed || state.fanTransitioning) &&
+      state.selectedAOIs.length > 0
+    ) {
+      // Reserve vertical space for the 3 suggestion chips immediately when expanded (or expanding from fan)
+      // with selected AOIs, even while the On-Device AI model is still generating them, so the PromptBox
+      // appears directly at its final clamped position and NEVER jumps upward once the chips finish generating!
       chipsW = Math.max(pbW, 280);
       chipsH = 2 * CHIP_STRIDE + CHIP_HEIGHT; // 3 chips * 48dp + 2 gaps * 8dp = 160px
     }
@@ -5299,6 +5307,7 @@ function activateOverlay(data) {
     }
 
     if (state.selectedAOIs.length > 0 || state.promptText.trim().length > 0) {
+      updateFloatingPromptBoxPosition(state.cursorX, state.cursorY, true);
       if (!wasActive) {
         // Reset lastRenderedSuggestionsSig on fresh activation so saved-draft suggestion chips
         // (including chips generated in the background while collapsed/dismissed) animate in cleanly!
@@ -5325,9 +5334,9 @@ function activateOverlay(data) {
           promptInput.focus({ preventScroll: true });
         }
       }, 350);
+      refreshCachedLayoutMetrics();
+      updateFloatingPromptBoxPosition(state.cursorX, state.cursorY, true);
     }
-    refreshCachedLayoutMetrics();
-    updateFloatingPromptBoxPosition(state.cursorX, state.cursorY, true);
   }
 }
 
