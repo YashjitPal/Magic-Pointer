@@ -574,7 +574,7 @@ function createTray() {
         submenu: [
           { id: 'gemini', name: 'Gemini (Default)' },
           { id: 'claude', name: 'Claude' },
-          { id: 'chatgpt', name: 'ChatGPT (Chat Mode)' }
+          { id: 'chatgpt', name: 'ChatGPT' }
         ].map((item) => {
           const installed = isTargetAppInstalled(item.id);
           return {
