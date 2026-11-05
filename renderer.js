@@ -794,10 +794,10 @@ function clampPromptBoxToScreenBounds(snap = false) {
     state.unclampedY = state.targetAnchorY;
   }
 
-  // MainScreenKt.java:55781: When !isFollowingCursor (i.e. expanded and stationary),
-  // translationX/Y is set directly to clampedPromptBoxOffset with ZERO lag/sliding!
-  const isStationaryExpanded = state.expanded && !state.isCollapsed && !state.selectingMoreScreen;
-  if (snap || isStationaryExpanded) {
+  // MainScreenKt.java:55786-55796 & MainScreenKt$MainScreen$10$1.java:70-85:
+  // On the real Googlebook, `hasAnimatedCursorFollowPosition` is TRUE during cursor following,
+  // so `translationX/Y` is set DIRECTLY to `clampedPromptBoxOffset` at 1:1 natural cursor speed!
+  if (!state.isExiting) {
     state.anchorX = state.targetAnchorX;
     state.anchorY = state.targetAnchorY;
     floatingAnchor.style.transform = `translate3d(${state.anchorX.toFixed(1)}px, ${state.anchorY.toFixed(1)}px, 0)`;
@@ -1929,17 +1929,10 @@ function renderFrame(now) {
     return;
   }
 
-  // 1. Smoothly interpolate Floating PromptBox position toward targetAnchorX/Y at 120fps+
+  // 1. Keep Floating PromptBox locked 1:1 to targetAnchorX/Y at natural OS cursor speed
   //    (Skip while exiting so we never overwrite the saveDraftAndExit flight transform!)
   if (!state.isExiting) {
-    const dx = state.targetAnchorX - state.anchorX;
-    const dy = state.targetAnchorY - state.anchorY;
-    if (Math.abs(dx) > 0.15 || Math.abs(dy) > 0.15) {
-      const alpha = 1.0 - Math.exp(-dt / 26.0);
-      state.anchorX += dx * alpha;
-      state.anchorY += dy * alpha;
-      floatingAnchor.style.transform = `translate3d(${state.anchorX.toFixed(1)}px, ${state.anchorY.toFixed(1)}px, 0)`;
-    } else if (dx !== 0 || dy !== 0) {
+    if (state.anchorX !== state.targetAnchorX || state.anchorY !== state.targetAnchorY) {
       state.anchorX = state.targetAnchorX;
       state.anchorY = state.targetAnchorY;
       floatingAnchor.style.transform = `translate3d(${state.anchorX.toFixed(1)}px, ${state.anchorY.toFixed(1)}px, 0)`;
@@ -3996,7 +3989,8 @@ function updateCursorTypeForTarget(target) {
   }
 }
 
-window.addEventListener('mousemove', (e) => {
+function handleLocalPointerMove(e) {
+  state.lastLocalPointerMoveMs = performance.now();
   state.cursorX = e.clientX;
   state.cursorY = e.clientY;
   state.ctrlPressed = e.ctrlKey;
@@ -4050,7 +4044,10 @@ window.addEventListener('mousemove', (e) => {
   if (!state.expanded || state.selectingMoreScreen || state.isCollapsed) {
     updateFloatingPromptBoxPosition(e.clientX, e.clientY, false);
   }
-}, { passive: true });
+}
+
+window.addEventListener('pointerrawupdate', handleLocalPointerMove, { passive: true });
+window.addEventListener('pointermove', handleLocalPointerMove, { passive: true });
 
 scrimCanvas.addEventListener('mousedown', (e) => {
   if (e.button !== 0) return;
@@ -5165,6 +5162,10 @@ api.onActivate((data) => activateOverlay(data || {}));
 
 api.onCursorMove((data) => {
   if (!state.active || !data) return;
+  // Ignore delayed IPC cursor packets if the overlay window is already receiving direct 1000Hz OS pointer/mousemove events!
+  if (state.lastLocalPointerMoveMs && performance.now() - state.lastLocalPointerMoveMs < 120) {
+    return;
+  }
   if (typeof data.x === 'number' && typeof data.y === 'number') {
     state.cursorX = data.x;
     state.cursorY = data.y;
