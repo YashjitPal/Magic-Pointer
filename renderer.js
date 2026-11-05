@@ -2463,6 +2463,7 @@ function recordShakeDismissOnFinish() {
 }
 
 function clearSuggestionChips() {
+  state.lastRenderedSuggestionsSig = '';
   state.chipMotions = [];
   state.cachedChipOffsets = [];
   suggestionChipsContainer.innerHTML = '';
@@ -3247,10 +3248,11 @@ function getContextualSuggestions() {
   // 1. MagicCue Chips (up to MAX_MAGIC_CUE_SUGGESTIONS = 2, bundled with the app!)
   const magicCueChips = getMagicCueSuggestionsForOcrText(combinedOcrText);
 
-  // 2. Gemini Chips (PromptBoxStateFragmentPeer.syncSuggestions lines 523-526):
-  //    - If the optional On-Device Vision + Suggestion AI is downloaded & enabled, send BOTH the cropped image (`dataUrl`)
-  //      and `ocrText` to `llm_worker.js` (which runs ResNet-50 image classification + LaMini-Flan-T5-77M).
-  //    - Before the worker finishes (or when not downloaded), use `buildInstantContextualGeminiPrompts`!
+  // 2. Gemini Chips (PromptBoxStateFragmentPeer.java:852-884):
+  //    - In Googlebook, `updateSuggestions` awaits `llmDeferred.await()` BEFORE emitting to `geminiSuggestionsFlow`!
+  //    - When the On-Device Vision + 248M LLM is enabled, we wait until the AI finishes generating the suggestions
+  //      before showing the Gemini chips (so they NEVER pop in twice or get replaced mid-animation!).
+  //    - When the AI model is Off / not downloaded, instant hardcoded contextual suggestions appear immediately!
   const aoiIdsKey = state.selectedAOIs.map((a) => `${a.id}:${(a.ocrText || '').length}`).join('|');
   state.currentLlmCacheKey = aoiIdsKey;
   let geminiPrompts = [];
@@ -3258,25 +3260,28 @@ function getContextualSuggestions() {
   if (state.llmSuggestionsEnabled && state.llmModelDownloaded) {
     if (state.llmChipsCache.has(aoiIdsKey)) {
       geminiPrompts = state.llmChipsCache.get(aoiIdsKey);
-    } else if (state.inflightLlmKey !== aoiIdsKey) {
-      state.inflightLlmKey = aoiIdsKey;
-      const worker = getOrCreateLlmWorker();
-      if (worker) {
-        const firstImageAoi = state.selectedAOIs.find((a) => a.dataUrl && a.type !== 'text');
-        worker.postMessage({
-          type: 'generate_suggestions',
-          reqId: aoiIdsKey,
-          ocrText: combinedOcrText,
-          imageDataUrl: firstImageAoi ? firstImageAoi.dataUrl : null,
-          aoiCount: count,
-          hasFiles,
-          modelDirUrl: state.llmModelDirUrl
-        });
+    } else {
+      if (state.inflightLlmKey !== aoiIdsKey) {
+        state.inflightLlmKey = aoiIdsKey;
+        const worker = getOrCreateLlmWorker();
+        if (worker) {
+          const firstImageAoi = state.selectedAOIs.find((a) => a.dataUrl && a.type !== 'text');
+          worker.postMessage({
+            type: 'generate_suggestions',
+            reqId: aoiIdsKey,
+            ocrText: combinedOcrText,
+            imageDataUrl: firstImageAoi ? firstImageAoi.dataUrl : null,
+            aoiCount: count,
+            hasFiles,
+            modelDirUrl: state.llmModelDirUrl
+          });
+        }
       }
+      // Return only MagicCue chips (if any) while the AI is generating; once the AI finishes,
+      // `suggestions_ready` renders the final chips once cleanly!
+      return magicCueChips;
     }
-  }
-
-  if (geminiPrompts.length === 0) {
+  } else {
     geminiPrompts = buildInstantContextualGeminiPrompts(combinedOcrText, existingLabels, count, hasFiles, hasTextAoi);
   }
 
@@ -3304,13 +3309,28 @@ function executeMagicCueSuggestion(suggestion) {
 }
 
 function renderSuggestionChips() {
-  state.chipGeneration += 1;
-  state.chipsCreatedAt = performance.now();
   const suggestions = getContextualSuggestions();
   if (!state.expanded || suggestions.length === 0) {
+    state.lastRenderedSuggestionsSig = '';
     clearSuggestionChips();
     return;
   }
+
+  // Deduplicate: if the exact same suggestion chips are already rendered & visible,
+  // do NOT destroy and re-animate them a second time!
+  const sig = suggestions.map((item) => (typeof item === 'string' ? item : `${item.kind}:${item.prompt}`)).join('||');
+  if (
+    state.lastRenderedSuggestionsSig === sig &&
+    !suggestionChipsContainer.classList.contains('hidden') &&
+    state.chipMotions.length === suggestions.length &&
+    !state.chipMotions.some((m) => m.exiting)
+  ) {
+    return;
+  }
+  state.lastRenderedSuggestionsSig = sig;
+
+  state.chipGeneration += 1;
+  state.chipsCreatedAt = performance.now();
 
   const total = suggestions.length;
   const now = performance.now();
@@ -3791,18 +3811,18 @@ aoiThumbnailFan.addEventListener('click', (e) => {
 });
 
 promptInput.addEventListener('focus', () => {
-  onUserInteraction();
   if (api.focusOverlay) api.focusOverlay();
-  if (!state.expanded) {
-    setExpandedState(true);
-  }
+  // Note: In Googlebook (PromptBoxKt$ExpandedState$3$1.java & PromptBoxStateFragmentPeer.updateText:539-545),
+  // merely focusing the text input does NOT exit aoiSelectionMode! Only typing non-blank text
+  // (or clicking the promptBox pill) transitions aoiSelectionMode -> false.
 });
 
 promptInput.addEventListener('scroll', updatePromptVerticalScrollbar);
 
 promptInput.addEventListener('input', () => {
   onUserInteraction();
-  // Exact port of PromptBoxKt.ContextControls$lambda$17$1$0 (PromptBoxKt.java:4983-4996):
+  // Exact port of PromptBoxKt.ContextControls$lambda$17$1$0 (PromptBoxKt.java:4983-4996) &
+  // PromptBoxStateFragmentPeer.updateText (PromptBoxStateFragmentPeer.java:539-545):
   // PROMPT_MAX_LENGTH = 1000: if length > 1000, truncate to 1000 and showCharacterLimitSnackbar() once until length <= 1000!
   if (promptInput.value.length > 1000) {
     promptInput.value = promptInput.value.slice(0, 1000);
@@ -3814,7 +3834,13 @@ promptInput.addEventListener('input', () => {
     state.shouldShowCharLimitSnackbar = true;
   }
   state.promptText = promptInput.value;
-  if (state.promptText.trim().length > 0) { state.hasUserEnteredContentBefore = true; state.aoiSelectionMode = false; }
+  if (state.promptText.trim().length > 0) {
+    state.hasUserEnteredContentBefore = true;
+    state.aoiSelectionMode = false;
+    if (!state.expanded) {
+      setExpandedState(true);
+    }
+  }
   promptInput.style.height = 'auto';
   const h = Math.min(96, promptInput.scrollHeight);
   promptInput.style.height = h + 'px';
@@ -4030,6 +4056,23 @@ window.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Escape') {
     handleEscapePressed();
+    return;
+  }
+  // If the user starts typing any printable character while in initial selection mode,
+  // ensure promptInput has focus so they can type directly without selecting an image first!
+  if (
+    state.active &&
+    !state.isCollapsed &&
+    document.activeElement !== promptInput &&
+    e.key.length === 1 &&
+    !e.ctrlKey &&
+    !e.metaKey &&
+    !e.altKey &&
+    fteModalBackdrop.classList.contains('hidden') &&
+    feedbackBackdrop.classList.contains('hidden')
+  ) {
+    if (api.focusOverlay) api.focusOverlay();
+    promptInput.focus({ preventScroll: true });
   }
 });
 
@@ -4491,6 +4534,15 @@ function activateOverlay(data) {
       syncPromptBoxMode();
       clearSuggestionChips();
       syncIdleExitHintTimer();
+      // Exact port of PromptBoxKt$ExpandedState$3$1.java:44-53:
+      // Auto-focus the text field after 350ms so the user can directly start typing a prompt
+      // without selecting an image first!
+      setTimeout(() => {
+        if (state.active && !state.isCollapsed && !state.isDraggingAOI && !state.isTextSelecting) {
+          if (api.focusOverlay) api.focusOverlay();
+          promptInput.focus({ preventScroll: true });
+        }
+      }, 350);
     }
     refreshCachedLayoutMetrics();
     updateFloatingPromptBoxPosition(state.cursorX, state.cursorY, true);
