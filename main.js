@@ -9,7 +9,7 @@ let overlayWindow = null;
 let tray = null;
 let nativeWatcher = null;
 let isMagicPointerActive = false;
-let sensitivityLevel = 2;
+let sensitivityLevel = 0;
 let isDarkMode = true;
 // MagicCue is bundled with the app (1.2 MB entity classifier pack) and enabled by default!
 let magicCueEnabled = true;
@@ -603,7 +603,7 @@ ipcMain.on('magic-pointer:focus-overlay', () => {
 
 ipcMain.on('magic-pointer:set-sensitivity', (_event, lvl) => {
   const num = Number(lvl);
-  sensitivityLevel = Math.max(0, Math.min(3, Number.isFinite(num) ? num : 2));
+  sensitivityLevel = Math.max(0, Math.min(3, Number.isFinite(num) ? num : 0));
   sendWatcherCommand(`SENSITIVITY:${sensitivityLevel}`);
 });
 

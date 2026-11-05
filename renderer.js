@@ -16,7 +16,7 @@ const state = {
   expanded: false,
   selectingMoreScreen: false,
   isDarkMode: true,
-  sensitivityLevel: 2,
+  sensitivityLevel: 0,
   cursorX: window.innerWidth / 2,
   cursorY: window.innerHeight / 2,
   cursorType: 'crosshair',
@@ -825,6 +825,12 @@ function refreshCachedLayoutMetrics() {
     if (!suggestionChipsContainer.classList.contains('hidden') && state.chipMotions.length > 0) {
       chipsW = suggestionChipsContainer.offsetWidth || 0;
       chipsH = (state.chipMotions.length - 1) * CHIP_STRIDE + CHIP_HEIGHT;
+    } else if (state.expanded && !state.isCollapsed && state.selectedAOIs.length > 0) {
+      // Reserve vertical space for the 3 suggestion chips immediately when expanded with selected AOIs,
+      // even while the On-Device AI model is still generating them, so the PromptBox appears directly
+      // at its final clamped position and NEVER jumps upward once the chips finish generating!
+      chipsW = Math.max(pbW, 280);
+      chipsH = 2 * CHIP_STRIDE + CHIP_HEIGHT; // 3 chips * 48dp + 2 gaps * 8dp = 160px
     }
     anchorW = Math.max(pbW, chipsW);
     anchorH = chipsH > 0 ? pbH + 8 + chipsH : pbH; // PROMPT_BOX_SUGGESTION_CHIPS_SPACING = 8dp
@@ -2418,7 +2424,7 @@ function updateCustomCursorTransform() {
 
 // Port of MainScreenKt.calculateClampedPromptBoxOffset
 function updateFloatingPromptBoxPosition(targetCursorX, targetCursorY, snapImmediately = false) {
-  if (state.isExiting) return;
+  if (state.isExiting || state.fanTransitioning) return;
   if ((state.isTextSelecting || state.pendingTextSelection) && !snapImmediately) return;
   if ((state.expanded && !state.isCollapsed) && !state.selectingMoreScreen && !snapImmediately) return;
   if (!snapImmediately && state.lastFollowX !== null && !state.jumpFading) {
@@ -3124,7 +3130,7 @@ function setExpandedState(expanded, opts = {}) {
         syncPromptBoxMode();
         renderCollapsedThumbnailFan();
         refreshCachedLayoutMetrics();
-        updateFloatingPromptBoxPosition(state.cursorX, state.cursorY, false);
+        updateFloatingPromptBoxPosition(state.cursorX, state.cursorY, true);
       }, 100);
     } else {
       state.isCollapsed = false;
@@ -4538,11 +4544,15 @@ function playExitWithoutSavingAnimation() {
   beginChipExit();
 
   setTimeout(() => {
+    // Hide the overlay root FIRST while the PromptBox is still at opacity: 0,
+    // and only remove `.exiting-without-saving` AFTER hiding `magicRoot` so the box NEVER
+    // flashes back to opacity: 1 for a frame before the IPC round-trip completes!
+    recordShakeDismissOnFinish();
+    magicRoot.classList.add('hidden');
     expandedStateWrapper.classList.remove('exiting-without-saving', 'exiting-empty-pill');
     promptBox.classList.remove('exiting-without-saving', 'exiting-empty-pill');
     promptBox.style.height = '';
     promptBox.style.transition = '';
-    recordShakeDismissOnFinish();
     state.selectedAOIs = [];
     state.promptText = '';
     promptInput.value = '';
@@ -4566,11 +4576,17 @@ btnClearClose.addEventListener('click', (e) => {
 
 // Exact port of PromptBoxKt.java:3108 (AddAoiThumbnail) & PromptBoxKt.java:8618 (ContextControls + button):
 // Clicking either + button directly calls peer.updateAOISelectionMode(true) -> enters screen selection mode!
+// Note: In PromptBoxKt$PromptBox$3$2$1.java:94-100, when collapsing to the thumbnail fan,
+// `isFollowingCursor` stays `false` during the 100ms fade-out so the Expanded PromptBox fades out
+// in place without jumping or sliding toward the + button!
 function handleStartScreenSelection() {
   state.selectingMoreScreen = true;
   state.aoiSelectionMode = true;
-  setExpandedState(false, { toFan: state.selectedAOIs.length > 0 });
-  updateFloatingPromptBoxPosition(state.cursorX, state.cursorY, false);
+  const hasAois = state.selectedAOIs.length > 0;
+  setExpandedState(false, { toFan: hasAois });
+  if (!hasAois) {
+    updateFloatingPromptBoxPosition(state.cursorX, state.cursorY, false);
+  }
 }
 
 btnAddContent.addEventListener('click', (e) => {
@@ -4769,10 +4785,10 @@ function showWiggleDetected() {
 }
 
 // ContextualCursorSettingsUtil.java:16-19:
-// MIN_WIGGLE_SPEED = 0, MAX_WIGGLE_SPEED = 3, DEFAULT_WIGGLE_SPEED = 2
+// MIN_WIGGLE_SPEED = 0, MAX_WIGGLE_SPEED = 3, DEFAULT_WIGGLE_SPEED = 0
 function applySensitivity(lvl, notify) {
   const num = Number(lvl);
-  const next = Math.min(3, Math.max(0, Number.isFinite(num) ? num : 2));
+  const next = Math.min(3, Math.max(0, Number.isFinite(num) ? num : 0));
   state.sensitivityLevel = next;
   sensitivitySlider.value = String(next);
   btnSliderMinus.disabled = next <= 0;
@@ -5310,6 +5326,6 @@ if (!window.magicPointerAPI) {
     y: window.innerHeight / 2,
     source: 'launch',
     isDarkMode: true,
-    sensitivityLevel: 2
+    sensitivityLevel: 0
   });
 }

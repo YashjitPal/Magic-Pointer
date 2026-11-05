@@ -278,8 +278,8 @@ namespace MagicCursorNative
         }
 
         // ContextualCursorSettingsUtil.java:16-19:
-        // MIN_WIGGLE_SPEED = 0, MAX_WIGGLE_SPEED = 3, DEFAULT_WIGGLE_SPEED = 2
-        static volatile int SensitivityLevel = 2;
+        // MIN_WIGGLE_SPEED = 0, MAX_WIGGLE_SPEED = 3, DEFAULT_WIGGLE_SPEED = 0
+        static volatile int SensitivityLevel = 0;
         static volatile bool OverlayActive = false;
         static volatile bool HadOverlayFocus = false;
         static long OverlayActivatedAtMs = 0;
