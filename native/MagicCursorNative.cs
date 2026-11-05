@@ -90,6 +90,77 @@ namespace MagicCursorNative
             public int Bottom;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        public struct CURSORINFO
+        {
+            public Int32 cbSize;
+            public Int32 flags;
+            public IntPtr hCursor;
+            public POINT ptScreenPos;
+        }
+
+        const Int32 CURSOR_SHOWING = 0x00000001;
+
+        [DllImport("user32.dll")]
+        static extern bool GetCursorInfo(ref CURSORINFO pci);
+
+        [DllImport("user32.dll")]
+        static extern bool GetClipCursor(out RECT lprc);
+
+        static bool IsGameOrMouseCaptureActive()
+        {
+            if (OverlayActive) return false;
+            try
+            {
+                // 1. In 3D games (Minecraft, Valorant, CS2, etc.), during gameplay the OS hardware cursor
+                // is hidden (`flags == 0`) while the game locks & re-centers the cursor every frame!
+                // If the user opens their inventory or pauses (Esc), the game shows the cursor (`CURSOR_SHOWING`) again.
+                CURSORINFO ci = new CURSORINFO();
+                ci.cbSize = Marshal.SizeOf(typeof(CURSORINFO));
+                if (GetCursorInfo(ref ci))
+                {
+                    if ((ci.flags & CURSOR_SHOWING) == 0)
+                    {
+                        return true;
+                    }
+                }
+
+                // 2. Also check if a game has locked the cursor into a small `ClipCursor` trap box
+                RECT clipRect;
+                if (GetClipCursor(out clipRect))
+                {
+                    Rectangle screenBounds = Screen.PrimaryScreen.Bounds;
+                    int clipW = clipRect.Right - clipRect.Left;
+                    int clipH = clipRect.Bottom - clipRect.Top;
+                    if (clipW > 0 && clipH > 0 && (clipW < screenBounds.Width - 32 || clipH < screenBounds.Height - 32))
+                    {
+                        IntPtr fg = GetForegroundWindow();
+                        if (fg != IntPtr.Zero && fg != OverlayHwnd)
+                        {
+                            RECT winRect;
+                            if (GetWindowRect(fg, out winRect))
+                            {
+                                int winW = winRect.Right - winRect.Left;
+                                int winH = winRect.Bottom - winRect.Top;
+                                // If ClipCursor is smaller than a tiny center box (< 200x200), it's a 3D mouselook trap!
+                                if (clipW < 200 && clipH < 200)
+                                {
+                                    return true;
+                                }
+                                // Or if the foreground window is fullscreen and clipping the cursor
+                                if (winW >= screenBounds.Width && winH >= screenBounds.Height)
+                                {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
         [DllImport("user32.dll")]
         static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 
@@ -1108,8 +1179,13 @@ namespace MagicCursorNative
 
                 bool isBackAndForth = bboxDiag > 14 && bboxDiag < 560 && (totalPath / Math.Max(1.0, bboxDiag)) >= 1.75;
                 bool lButtonDown = (GetAsyncKeyState(0x01) & 0x8000) != 0;
+                bool rButtonDown = (GetAsyncKeyState(0x02) & 0x8000) != 0;
 
-                if (!lButtonDown && isBackAndForth && totalReversals >= requiredReversals && totalPath >= minTotalPath && (nowMs - lastShakeMs) > 750)
+                if (!OverlayActive && IsGameOrMouseCaptureActive())
+                {
+                    history.Clear();
+                }
+                else if (!lButtonDown && !rButtonDown && isBackAndForth && totalReversals >= requiredReversals && totalPath >= minTotalPath && (nowMs - lastShakeMs) > 750)
                 {
                     lastShakeMs = nowMs;
                     history.Clear();

@@ -1850,22 +1850,21 @@ function redrawScrimCanvas() {
       );
       ctx.fill();
     } else if (state.isTextSelecting) {
-      // Point 4: While dragging to select text on the page, brighten ALL detected text blocks on the page
-      // by cutting out the dark tint over every OCR text block so all text appears in its normal bright color!
+      // Point 1: While dragging to select text on the page, cut out ONLY the tight individual word boxes
+      // directly (without any padded region or paragraph block box around them), so only the words themselves
+      // are exempt from the dark background tint!
       ctx.globalCompositeOperation = 'destination-out';
       ctx.fillStyle = 'rgba(0, 0, 0, 1)';
-      for (const ocrAoi of state.ocrTextAOIs) {
-        const tr = ocrAoi.rect;
-        if (!tr) continue;
-        drawRoundedRectPath(
-          ctx,
-          tr.x - 6,
-          tr.y - 4,
-          tr.width + 12,
-          tr.height + 8,
-          8
-        );
-        ctx.fill();
+      if (state.pageOcrBlock && Array.isArray(state.pageOcrBlock.lines)) {
+        for (const line of state.pageOcrBlock.lines) {
+          if (!line || !Array.isArray(line.elements)) continue;
+          for (const el of line.elements) {
+            const b = el && el.boundingBox;
+            if (!b || b.width <= 0 || b.height <= 0) continue;
+            drawRoundedRectPath(ctx, b.left, b.top, b.width, b.height, 2);
+            ctx.fill();
+          }
+        }
       }
     } else if (state.pendingTextSelection && state.pendingTextSelection.rect) {
       // Once text selection finishes, cutout & highlight the selected text area!
@@ -2420,6 +2419,7 @@ function updateCustomCursorTransform() {
 // Port of MainScreenKt.calculateClampedPromptBoxOffset
 function updateFloatingPromptBoxPosition(targetCursorX, targetCursorY, snapImmediately = false) {
   if (state.isExiting) return;
+  if ((state.isTextSelecting || state.pendingTextSelection) && !snapImmediately) return;
   if ((state.expanded && !state.isCollapsed) && !state.selectingMoreScreen && !snapImmediately) return;
   if (!snapImmediately && state.lastFollowX !== null && !state.jumpFading) {
     const dist = Math.hypot(targetCursorX - state.lastFollowX, targetCursorY - state.lastFollowY);
@@ -2852,6 +2852,7 @@ const COPY_ICON_PATH_DEFAULT = 'M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 
 const COPY_ICON_PATH_CHECK = 'M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z';
 
 function clearTextSelectionActionsImmediate() {
+  const hadPending = !!state.pendingTextSelection;
   state.pendingTextSelection = null;
   state.textActionCircles = [];
   state.textActionShaderCircles = [];
@@ -2861,6 +2862,10 @@ function clearTextSelectionActionsImmediate() {
   if (iconTextSelCopy) {
     const p = iconTextSelCopy.querySelector('path');
     if (p) p.setAttribute('d', COPY_ICON_PATH_DEFAULT);
+  }
+  if (hadPending && !state.isDraggingAOI && !state.isTextSelecting) {
+    floatingAnchor.classList.remove('dragging-active');
+    updateFloatingPromptBoxPosition(state.cursorX, state.cursorY, true);
   }
   state.scrimDirty = true;
 }
@@ -2968,8 +2973,8 @@ function showTextSelectionActions(selectionObj) {
     };
   });
 
-  // Position the floating prompt box neatly so it doesn't overlap the two action circles
-  updateFloatingPromptBoxPosition(groupX + groupW + 16, groupY + groupH * 0.5, true);
+  // Point 2: Keep the PromptBox hidden while the Copy & Plus circles are waiting to be clicked!
+  floatingAnchor.classList.add('dragging-active');
 }
 
 function tickTextActionCircles(dtMs, now) {
@@ -4012,6 +4017,8 @@ window.addEventListener('mousemove', (e) => {
           state.textSelEndX = e.clientX;
           state.textSelEndY = e.clientY;
           setCursorType('ibeam');
+          // Point 2: Hide the PromptBox while drag-selecting text!
+          floatingAnchor.classList.add('dragging-active');
         } else {
           state.isDraggingAOI = true;
           setCursorType('crosshair');
@@ -4109,6 +4116,7 @@ window.addEventListener('mouseup', async (e) => {
 
       if (canShowCopyActions) {
         showTextSelectionActions(pageSel);
+        // Keep PromptBox hidden until the user clicks the '+' circle (or dismisses the selection)!
       } else {
         await addSelectedTextCardToDraft(pageSel.text, { rect: pageSel.rect });
         state.selectingMoreScreen = false;
@@ -4122,9 +4130,11 @@ window.addEventListener('mouseup', async (e) => {
           setExpandedState(true, { skipFanAnim: wasCollapsedFan });
         }
         renderScreenAOICards();
+        floatingAnchor.classList.remove('dragging-active');
       }
+    } else {
+      floatingAnchor.classList.remove('dragging-active');
     }
-    floatingAnchor.classList.remove('dragging-active');
     return;
   }
 
@@ -4334,6 +4344,7 @@ if (btnTextSelAdd) {
     await addSelectedTextCardToDraft(textToAdd, { rect: selRect });
     state.selectingMoreScreen = false;
     updateFloatingPromptBoxPosition(e.clientX, e.clientY, true);
+    floatingAnchor.classList.remove('dragging-active');
     if (e.ctrlKey || state.ctrlPressed) {
       state.multiAoiSelectionMode = true;
       setExpandedState(false, { toFan: true });
@@ -5160,6 +5171,7 @@ api.onCursorMove((data) => {
             state.textSelEndX = data.x;
             state.textSelEndY = data.y;
             setCursorType('ibeam');
+            floatingAnchor.classList.add('dragging-active');
           } else {
             state.isDraggingAOI = true;
             setCursorType('crosshair');
