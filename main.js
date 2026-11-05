@@ -337,8 +337,12 @@ function createOverlayWindow() {
       sendWatcherCommand(`HWND:${hwndVal}`);
     } catch (_) {}
     if (process.argv.includes('--activate') || !process.argv.includes('--background')) {
-      const cursorPt = screen.getCursorScreenPoint();
-      activateMagicPointer(cursorPt.x, cursorPt.y, 'launch');
+      // Wait 120ms before activating on initial launch so `startNativeWatcher()` is already spawned
+      // and receives `SNAPSHOT` to run full-screen OCR + screenshot capture!
+      setTimeout(() => {
+        const cursorPt = screen.getCursorScreenPoint();
+        activateMagicPointer(cursorPt.x, cursorPt.y, 'launch');
+      }, 120);
     }
   });
 }
@@ -374,7 +378,9 @@ function activateMagicPointer(rawX, rawY, source = 'shake') {
     llmSuggestionsEnabled,
     llmModelDownloaded,
     llmModelDirUrl: getLlmModelDirFileUrl(),
-    detectedWindows: cachedDetectedWindows
+    detectedWindows: cachedDetectedWindows,
+    screenshot: latestScreenshotInfo,
+    ocr: latestOcrInfo
   });
 }
 

@@ -1361,16 +1361,18 @@ namespace MagicCursorNative
         static void SendCtrlV()
         {
             keybd_event(VK_CONTROL, 0, 0, UIntPtr.Zero);
+            Thread.Sleep(18);
             keybd_event(VK_V, 0, 0, UIntPtr.Zero);
-            Thread.Sleep(8);
+            Thread.Sleep(18);
             keybd_event(VK_V, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            Thread.Sleep(18);
             keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
         }
 
         static void SendEnterKey()
         {
             keybd_event(VK_RETURN, 0, 0, UIntPtr.Zero);
-            Thread.Sleep(8);
+            Thread.Sleep(18);
             keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
         }
 
@@ -1869,8 +1871,9 @@ namespace MagicCursorNative
             IntPtr aiHwnd = OpenAndPositionAiDesktopApp(targetApp);
             if (aiHwnd == IntPtr.Zero) return;
 
-            // Focus the composer input ONCE after resizing!
+            // Focus the composer input after resizing and wait 60ms for WebContentsView focus to settle
             ClickAndFocusComposerInput(aiHwnd, targetApp);
+            Thread.Sleep(60);
 
             bool hasAttachments = (imageFiles.Count > 0 || otherFiles.Count > 0);
             List<string> allAttachmentFiles = new List<string>();
@@ -1883,23 +1886,23 @@ namespace MagicCursorNative
                 {
                     if (imageFiles.Count == 1 && otherFiles.Count == 0)
                     {
-                        // Single image crop: put bitmap on clipboard and paste immediately in one shot!
                         using (Image img = Image.FromFile(imageFiles[0]))
                         {
                             SetClipboardImageRetry(img);
                         }
+                        Thread.Sleep(35);
                         SendCtrlV();
-                        Thread.Sleep(90);
+                        // Give Chromium 260ms to finish reading the clipboard bitmap before overwriting the clipboard with text!
+                        Thread.Sleep(260);
                     }
                     else
                     {
-                        // Multiple images and/or files: batch ALL attachments into a single FileDropList
-                        // and paste them all at once with ONE Ctrl+V instead of one-by-one!
                         StringCollection sc = new StringCollection();
                         foreach (string fp in allAttachmentFiles) sc.Add(fp);
                         SetClipboardFileDropListRetry(sc);
+                        Thread.Sleep(35);
                         SendCtrlV();
-                        Thread.Sleep(110);
+                        Thread.Sleep(280);
                     }
                 }
                 catch { }
@@ -1908,22 +1911,23 @@ namespace MagicCursorNative
             if (!string.IsNullOrWhiteSpace(prompt))
             {
                 SetClipboardTextRetry(prompt);
-                Thread.Sleep(15);
+                Thread.Sleep(45);
+                ClickAndFocusComposerInput(aiHwnd, targetApp);
+                Thread.Sleep(30);
                 SendCtrlV();
-                Thread.Sleep(hasAttachments ? 160 : 50);
+                Thread.Sleep(hasAttachments ? 320 : 120);
                 SendEnterKey();
                 if (hasAttachments)
                 {
-                    // Single non-blocking follow-up Enter in case the image upload spinner was still active at +160ms
-                    Thread.Sleep(380);
+                    Thread.Sleep(550);
                     SendEnterKey();
                 }
             }
             else if (hasAttachments)
             {
-                Thread.Sleep(180);
+                Thread.Sleep(320);
                 SendEnterKey();
-                Thread.Sleep(380);
+                Thread.Sleep(550);
                 SendEnterKey();
             }
         }
