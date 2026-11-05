@@ -390,7 +390,14 @@ namespace MagicCursorNative
 
             if (args.Length > 0 && args[0] == "--open-gemini-app")
             {
-                OpenAndPositionGeminiDesktopApp();
+                OpenAndPositionAiDesktopApp("gemini");
+                return;
+            }
+
+            if (args.Length > 0 && args[0] == "--open-ai-app")
+            {
+                string target = args.Length >= 2 ? args[1] : "gemini";
+                OpenAndPositionAiDesktopApp(target);
                 return;
             }
 
@@ -1201,8 +1208,9 @@ namespace MagicCursorNative
         const int SW_RESTORE = 9;
         const uint SWP_NOZORDER = 0x0004;
 
-        static IntPtr FindGeminiDesktopAppWindow()
+        static IntPtr FindAiDesktopAppWindow(string targetApp)
         {
+            string app = (targetApp ?? "gemini").Trim().ToLowerInvariant();
             IntPtr foundExact = IntPtr.Zero;
             IntPtr foundFallback = IntPtr.Zero;
             EnumWindows((hWnd, lParam) =>
@@ -1218,7 +1226,7 @@ namespace MagicCursorNative
                     return true;
                 }
 
-                // Ignore Chrome / Edge / Brave / Firefox browser tabs so we ONLY target the standalone Gemini Desktop App!
+                // Ignore Chrome / Edge / Brave / Firefox browser tabs so we ONLY target standalone AI Desktop Apps!
                 if (title.IndexOf("Google Chrome", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     title.IndexOf("Microsoft\u200b Edge", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     title.IndexOf("Microsoft Edge", StringComparison.OrdinalIgnoreCase) >= 0 ||
@@ -1246,22 +1254,55 @@ namespace MagicCursorNative
                 if (procName.Equals("chrome", StringComparison.OrdinalIgnoreCase) ||
                     procName.Equals("msedge", StringComparison.OrdinalIgnoreCase) ||
                     procName.Equals("brave", StringComparison.OrdinalIgnoreCase) ||
-                    procName.Equals("firefox", StringComparison.OrdinalIgnoreCase))
+                    procName.Equals("firefox", StringComparison.OrdinalIgnoreCase) ||
+                    procName.Equals("cursor", StringComparison.OrdinalIgnoreCase) ||
+                    procName.Equals("Code", StringComparison.OrdinalIgnoreCase))
                 {
                     return true;
                 }
 
-                if (procName.IndexOf("Gemini", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    title.Trim().Equals("Gemini", StringComparison.OrdinalIgnoreCase) ||
-                    title.IndexOf("Google Gemini", StringComparison.OrdinalIgnoreCase) >= 0)
+                if (app == "claude")
                 {
-                    foundExact = hWnd;
-                    return false;
+                    if (procName.IndexOf("claude", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        title.Trim().Equals("Claude", StringComparison.OrdinalIgnoreCase))
+                    {
+                        foundExact = hWnd;
+                        return false;
+                    }
+                    if (title.IndexOf("Claude", StringComparison.OrdinalIgnoreCase) >= 0 && foundFallback == IntPtr.Zero)
+                    {
+                        foundFallback = hWnd;
+                    }
                 }
-
-                if (title.IndexOf("Gemini", StringComparison.OrdinalIgnoreCase) >= 0 && foundFallback == IntPtr.Zero)
+                else if (app == "chatgpt")
                 {
-                    foundFallback = hWnd;
+                    if (procName.IndexOf("ChatGPT", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        procName.Equals("Codex", StringComparison.OrdinalIgnoreCase) ||
+                        title.Trim().Equals("ChatGPT", StringComparison.OrdinalIgnoreCase))
+                    {
+                        foundExact = hWnd;
+                        return false;
+                    }
+                    if ((title.IndexOf("ChatGPT", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                         title.IndexOf("Codex", StringComparison.OrdinalIgnoreCase) >= 0) &&
+                        foundFallback == IntPtr.Zero)
+                    {
+                        foundFallback = hWnd;
+                    }
+                }
+                else
+                {
+                    if (procName.IndexOf("Gemini", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        title.Trim().Equals("Gemini", StringComparison.OrdinalIgnoreCase) ||
+                        title.IndexOf("Google Gemini", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        foundExact = hWnd;
+                        return false;
+                    }
+                    if (title.IndexOf("Gemini", StringComparison.OrdinalIgnoreCase) >= 0 && foundFallback == IntPtr.Zero)
+                    {
+                        foundFallback = hWnd;
+                    }
                 }
                 return true;
             }, IntPtr.Zero);
@@ -1300,11 +1341,122 @@ namespace MagicCursorNative
             keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
         }
 
-        static bool TryLaunchGeminiDesktopAppExecutable()
+        // Ensure the OpenAI ChatGPT / Codex Desktop App opens in Chat Mode (`selectedSurface = "chat"`, `sidePanelSelectedSurface = "chat"`)
+        static void EnsureChatGptDesktopChatModeConfig()
         {
+            try
+            {
+                string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                string stateFile = Path.Combine(userProfile, ".codex", ".codex-global-state.json");
+                if (!File.Exists(stateFile)) return;
+                string raw = File.ReadAllText(stateFile, Encoding.UTF8);
+                string updated = Regex.Replace(raw, "\"selectedSurface\"\\s*:\\s*\"[^\"]*\"", "\"selectedSurface\":\"chat\"");
+                updated = Regex.Replace(updated, "\"sidePanelSelectedSurface\"\\s*:\\s*\"[^\"]*\"", "\"sidePanelSelectedSurface\":\"chat\"");
+                if (updated != raw)
+                {
+                    File.WriteAllText(stateFile, updated, Encoding.UTF8);
+                }
+            }
+            catch { }
+        }
+
+        static bool TryLaunchAiDesktopAppExecutable(string targetApp)
+        {
+            string app = (targetApp ?? "gemini").Trim().ToLowerInvariant();
             string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            string winApps = Path.Combine(localAppData, @"Microsoft\WindowsApps");
+
+            if (app == "claude")
+            {
+                string[] claudeExes = new string[]
+                {
+                    Path.Combine(winApps, "claude-desktop.exe"),
+                    Path.Combine(localAppData, @"AnthropicClaude\claude.exe"),
+                    Path.Combine(localAppData, @"Programs\Claude\Claude.exe"),
+                    Path.Combine(localAppData, @"Programs\claude\claude.exe")
+                };
+                foreach (string exe in claudeExes)
+                {
+                    if (File.Exists(exe))
+                    {
+                        try
+                        {
+                            Process.Start(new ProcessStartInfo
+                            {
+                                FileName = exe,
+                                WorkingDirectory = Path.GetDirectoryName(exe),
+                                UseShellExecute = true
+                            });
+                            return true;
+                        }
+                        catch { }
+                    }
+                }
+                string claudeLnk = Path.Combine(appData, @"Microsoft\Windows\Start Menu\Programs\Claude.lnk");
+                if (File.Exists(claudeLnk))
+                {
+                    try
+                    {
+                        Process.Start(new ProcessStartInfo { FileName = claudeLnk, UseShellExecute = true });
+                        return true;
+                    }
+                    catch { }
+                }
+                try
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = "explorer.exe",
+                        Arguments = @"shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude",
+                        UseShellExecute = true
+                    });
+                    return true;
+                }
+                catch { }
+                return false;
+            }
+
+            if (app == "chatgpt")
+            {
+                EnsureChatGptDesktopChatModeConfig();
+                string[] chatGptExes = new string[]
+                {
+                    Path.Combine(winApps, "chatgpt-desktop.exe"),
+                    Path.Combine(localAppData, @"Programs\ChatGPT\ChatGPT.exe"),
+                    Path.Combine(localAppData, @"ChatGPT\ChatGPT.exe"),
+                    Path.Combine(localAppData, @"OpenAI\ChatGPT\ChatGPT.exe")
+                };
+                foreach (string exe in chatGptExes)
+                {
+                    if (File.Exists(exe))
+                    {
+                        try
+                        {
+                            Process.Start(new ProcessStartInfo
+                            {
+                                FileName = exe,
+                                UseShellExecute = true
+                            });
+                            return true;
+                        }
+                        catch { }
+                    }
+                }
+                try
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = "explorer.exe",
+                        Arguments = @"shell:AppsFolder\OpenAI.Codex_2p2nqsd0c76g0!App",
+                        UseShellExecute = true
+                    });
+                    return true;
+                }
+                catch { }
+                return false;
+            }
 
             string[] candidateExes = new string[]
             {
@@ -1334,43 +1486,20 @@ namespace MagicCursorNative
                 }
             }
 
-            string[] candidateShortcuts = new string[]
-            {
-                Path.Combine(appData, @"Microsoft\Windows\Start Menu\Programs\Gemini.lnk"),
-                Path.Combine(userProfile, @"Desktop\Gemini.lnk")
-            };
-
-            foreach (string lnk in candidateShortcuts)
-            {
-                if (File.Exists(lnk))
-                {
-                    try
-                    {
-                        Process.Start(new ProcessStartInfo
-                        {
-                            FileName = lnk,
-                            UseShellExecute = true
-                        });
-                        return true;
-                    }
-                    catch { }
-                }
-            }
-
             return false;
         }
 
         // Exact port of Googlebook RobinKit non-fullscreen companion window behavior
         // (`TextQuery.shouldUseFullScreenMode = false` in `RobinKitServiceGrpcClientImpl.java:455-516`):
-        // Un-maximizes the Gemini Desktop App (`SW_RESTORE`) and resizes/docks it into a floating companion
+        // Un-maximizes the target AI Desktop App (`SW_RESTORE`) and resizes/docks it into a floating companion
         // window on the right side of the work area so it doesn't cover the screen content you just pointed at!
-        static void ResizeAndFocusGeminiCompanionWindow(IntPtr geminiHwnd)
+        static void ResizeAndFocusCompanionWindow(IntPtr appHwnd)
         {
-            if (geminiHwnd == IntPtr.Zero) return;
+            if (appHwnd == IntPtr.Zero) return;
             try
             {
                 // 1. Restore from maximized/minimized state (`SW_RESTORE = 9`) so `SetWindowPos` can resize it out of full screen
-                ShowWindow(geminiHwnd, SW_RESTORE);
+                ShowWindow(appHwnd, SW_RESTORE);
                 Thread.Sleep(40);
 
                 // 2. Compute floating companion bounds on the right side of the primary display work area
@@ -1381,7 +1510,7 @@ namespace MagicCursorNative
                 int targetX = workArea.Right - targetW - margin;
                 int targetY = workArea.Top + Math.Max(margin, (workArea.Height - targetH) / 2);
 
-                SetWindowPos(geminiHwnd, IntPtr.Zero, targetX, targetY, targetW, targetH, SWP_NOZORDER | SWP_SHOWWINDOW);
+                SetWindowPos(appHwnd, IntPtr.Zero, targetX, targetY, targetW, targetH, SWP_NOZORDER | SWP_SHOWWINDOW);
 
                 // 3. Bring to foreground focus cleanly
                 uint dummyPid;
@@ -1390,66 +1519,74 @@ namespace MagicCursorNative
                 if (fgThread != 0 && fgThread != curThread)
                 {
                     AttachThreadInput(curThread, fgThread, true);
-                    SetForegroundWindow(geminiHwnd);
-                    BringWindowToTop(geminiHwnd);
+                    SetForegroundWindow(appHwnd);
+                    BringWindowToTop(appHwnd);
                     AttachThreadInput(curThread, fgThread, false);
                 }
                 else
                 {
-                    SetForegroundWindow(geminiHwnd);
-                    BringWindowToTop(geminiHwnd);
+                    SetForegroundWindow(appHwnd);
+                    BringWindowToTop(appHwnd);
                 }
             }
             catch { }
         }
 
-        static IntPtr OpenAndPositionGeminiDesktopApp()
+        static IntPtr OpenAndPositionSingleAiApp(string appId)
         {
-            IntPtr geminiHwnd = FindGeminiDesktopAppWindow();
-            if (geminiHwnd != IntPtr.Zero)
+            string app = (appId ?? "gemini").Trim().ToLowerInvariant();
+            if (app == "chatgpt")
             {
-                ResizeAndFocusGeminiCompanionWindow(geminiHwnd);
+                EnsureChatGptDesktopChatModeConfig();
+            }
+
+            IntPtr appHwnd = FindAiDesktopAppWindow(app);
+            if (appHwnd != IntPtr.Zero)
+            {
+                ResizeAndFocusCompanionWindow(appHwnd);
                 Thread.Sleep(240);
-                return geminiHwnd;
+                return appHwnd;
             }
 
-            // First try launching the standalone Gemini Desktop App executable directly
-            bool launchedExe = TryLaunchGeminiDesktopAppExecutable();
-            if (!launchedExe)
+            bool launchedExe = TryLaunchAiDesktopAppExecutable(app);
+            if (!launchedExe && app == "gemini")
             {
-                // Otherwise trigger the Gemini Desktop App's global hotkey (`Win + Shift + G`)
                 SendWinShiftG();
             }
 
-            for (int i = 0; i < 30; i++)
+            for (int i = 0; i < 32; i++)
             {
-                Thread.Sleep(120);
-                geminiHwnd = FindGeminiDesktopAppWindow();
-                if (geminiHwnd != IntPtr.Zero)
+                Thread.Sleep(125);
+                appHwnd = FindAiDesktopAppWindow(app);
+                if (appHwnd != IntPtr.Zero)
                 {
-                    ResizeAndFocusGeminiCompanionWindow(geminiHwnd);
-                    Thread.Sleep(450);
-                    return geminiHwnd;
+                    ResizeAndFocusCompanionWindow(appHwnd);
+                    Thread.Sleep(550);
+                    return appHwnd;
                 }
             }
 
-            // If direct exe launch didn't immediately produce the window, also try `Win + Shift + G` once
-            if (launchedExe)
+            return IntPtr.Zero;
+        }
+
+        static IntPtr OpenAndPositionAiDesktopApp(string preferredApp)
+        {
+            string pref = (preferredApp ?? "gemini").Trim().ToLowerInvariant();
+            // Build fallback order: preferred -> gemini -> claude -> chatgpt
+            List<string> order = new List<string>();
+            order.Add(pref);
+            if (!order.Contains("gemini")) order.Add("gemini");
+            if (!order.Contains("claude")) order.Add("claude");
+            if (!order.Contains("chatgpt")) order.Add("chatgpt");
+
+            foreach (string candidate in order)
             {
-                SendWinShiftG();
-                for (int i = 0; i < 16; i++)
+                IntPtr hwnd = OpenAndPositionSingleAiApp(candidate);
+                if (hwnd != IntPtr.Zero)
                 {
-                    Thread.Sleep(110);
-                    geminiHwnd = FindGeminiDesktopAppWindow();
-                    if (geminiHwnd != IntPtr.Zero)
-                    {
-                        ResizeAndFocusGeminiCompanionWindow(geminiHwnd);
-                        Thread.Sleep(350);
-                        return geminiHwnd;
-                    }
+                    return hwnd;
                 }
             }
-
             return IntPtr.Zero;
         }
 
@@ -1457,6 +1594,7 @@ namespace MagicCursorNative
         {
             if (!File.Exists(payloadPath)) return;
             string[] lines = File.ReadAllLines(payloadPath, Encoding.UTF8);
+            string targetApp = "gemini";
             string prompt = "";
             List<string> imageFiles = new List<string>();
             List<string> otherFiles = new List<string>();
@@ -1464,7 +1602,11 @@ namespace MagicCursorNative
             foreach (string raw in lines)
             {
                 string line = raw.Trim();
-                if (line.StartsWith("PROMPT_B64:"))
+                if (line.StartsWith("TARGET_APP:"))
+                {
+                    targetApp = line.Substring("TARGET_APP:".Length).Trim().ToLowerInvariant();
+                }
+                else if (line.StartsWith("PROMPT_B64:"))
                 {
                     byte[] bytes = Convert.FromBase64String(line.Substring("PROMPT_B64:".Length));
                     prompt = Encoding.UTF8.GetString(bytes);
@@ -1481,8 +1623,8 @@ namespace MagicCursorNative
                 }
             }
 
-            IntPtr geminiHwnd = OpenAndPositionGeminiDesktopApp();
-            if (geminiHwnd == IntPtr.Zero) return;
+            IntPtr aiHwnd = OpenAndPositionAiDesktopApp(targetApp);
+            if (aiHwnd == IntPtr.Zero) return;
 
             foreach (string imgPath in imageFiles)
             {

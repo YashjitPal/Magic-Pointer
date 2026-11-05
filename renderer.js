@@ -17,6 +17,8 @@ const state = {
   selectingMoreScreen: false,
   isDarkMode: true,
   sensitivityLevel: 0,
+  targetApp: 'gemini',
+  targetAppAvailability: { gemini: true, claude: true, chatgpt: true },
   cursorX: window.innerWidth / 2,
   cursorY: window.innerHeight / 2,
   cursorType: 'crosshair',
@@ -197,9 +199,12 @@ const api = window.magicPointerAPI || {
   onCursorMove() {},
   onSensitivityChange() {},
   onThemeChange() {},
+  onTargetAppChange() {},
   dismiss() {},
   setSensitivity() {},
   setTheme() {},
+  getTargetApp: async () => ({ targetApp: 'gemini', availability: {} }),
+  setTargetApp: async () => ({ ok: true }),
   cropAOI: async () => null,
   getWindows: async () => [],
   pickFiles: async () => [],
@@ -2503,6 +2508,41 @@ function addAoiButtonDelay(total) {
   return Math.min(selectedAoiStaggerDelay(total - 1, total) + 50, 150);
 }
 
+function getTargetAppDisplayName(appId = state.targetApp) {
+  if (appId === 'claude') return 'Claude';
+  if (appId === 'chatgpt') return 'ChatGPT';
+  return 'Gemini';
+}
+
+function syncTargetAppUI() {
+  const appName = getTargetAppDisplayName(state.targetApp);
+  promptInput.placeholder = state.aoiSelectionMode ? `Point and select to ask ${appName}` : `Ask ${appName}`;
+
+  if (btnTextSelAdd) {
+    btnTextSelAdd.setAttribute('data-tooltip', `Add to ${appName}`);
+    btnTextSelAdd.setAttribute('aria-label', `Add to ${appName}`);
+  }
+
+  const fteTitle = document.getElementById('fte-enable-mp-title');
+  if (fteTitle) fteTitle.textContent = `Point to ask ${appName}`;
+  const fteDesc = document.getElementById('fte-enable-mp-desc');
+  if (fteDesc) {
+    fteDesc.textContent = `With Magic Pointer, point at or drag to select objects on your screen and get help from ${appName}`;
+  }
+
+  const badge = document.getElementById('target-app-badge');
+  if (badge) {
+    const installed = state.targetAppAvailability && state.targetAppAvailability[state.targetApp] !== false;
+    badge.textContent = installed ? `${appName} · Active` : `${appName} · Selected`;
+    badge.classList.toggle('installed', installed);
+  }
+
+  document.querySelectorAll('.target-app-pill').forEach((pill) => {
+    const id = pill.getAttribute('data-target-app');
+    pill.classList.toggle('active', id === state.targetApp);
+  });
+}
+
 function syncPromptBoxMode() {
   const hasAOIs = state.selectedAOIs.length > 0;
   const hasText = state.promptText.trim().length > 0;
@@ -2526,7 +2566,7 @@ function syncPromptBoxMode() {
   }
   if (addBtnContainer) addBtnContainer.classList.toggle('hidden', !showAddIcon);
   if (btnSendPrompt) btnSendPrompt.classList.toggle('hidden', !(state.expanded && !state.isCollapsed && showSendIcon));
-  promptInput.placeholder = state.aoiSelectionMode ? 'Point and select to ask Gemini' : 'Ask Gemini';
+  syncTargetAppUI();
 }
 
 function playPromptExpandEnter() {
@@ -3944,6 +3984,7 @@ async function submitPromptToGemini(overridePrompt = null) {
   promptInput.style.height = 'auto';
 
   await api.sendToGemini({
+    targetApp: state.targetApp,
     prompt: finalPrompt,
     attachments
   });
@@ -4990,6 +5031,32 @@ if (btnMagicCueAction) {
   });
 }
 
+document.querySelectorAll('.target-app-pill').forEach((pill) => {
+  pill.addEventListener('click', async () => {
+    const nextApp = pill.getAttribute('data-target-app');
+    if (!nextApp || !['gemini', 'claude', 'chatgpt'].includes(nextApp)) return;
+    state.targetApp = nextApp;
+    syncTargetAppUI();
+    if (api.setTargetApp) {
+      const res = await api.setTargetApp(nextApp);
+      if (res && res.availability) {
+        state.targetAppAvailability = res.availability;
+        syncTargetAppUI();
+      }
+    }
+  });
+});
+
+if (api.getTargetApp) {
+  api.getTargetApp().then((st) => {
+    if (st && st.targetApp) {
+      state.targetApp = st.targetApp;
+      if (st.availability) state.targetAppAvailability = st.availability;
+      syncTargetAppUI();
+    }
+  });
+}
+
 if (api.getMagicCueState) {
   api.getMagicCueState().then((st) => {
     if (st) {
@@ -5052,10 +5119,17 @@ function activateOverlay(data) {
   applyTheme(data.isDarkMode !== false);
 
   if (typeof data.sensitivityLevel === 'number') applySensitivity(data.sensitivityLevel, false);
+  if (typeof data.targetApp === 'string' && ['gemini', 'claude', 'chatgpt'].includes(data.targetApp)) {
+    state.targetApp = data.targetApp;
+  }
+  if (data.targetAppAvailability) {
+    state.targetAppAvailability = data.targetAppAvailability;
+  }
   if (typeof data.magicCueEnabled === 'boolean') state.magicCueEnabled = data.magicCueEnabled;
   if (typeof data.llmSuggestionsEnabled === 'boolean') state.llmSuggestionsEnabled = data.llmSuggestionsEnabled;
   if (typeof data.llmModelDownloaded === 'boolean') state.llmModelDownloaded = data.llmModelDownloaded;
   if (data.llmModelDirUrl) state.llmModelDirUrl = data.llmModelDirUrl;
+  syncTargetAppUI();
   syncLlmSettingsUI();
 
     if (!wasActive) {
@@ -5321,6 +5395,19 @@ api.onSensitivityChange((lvl) => {
 api.onThemeChange((dark) => {
   applyTheme(dark);
 });
+
+if (api.onTargetAppChange) {
+  api.onTargetAppChange((st) => {
+    if (!st) return;
+    if (st.targetApp && ['gemini', 'claude', 'chatgpt'].includes(st.targetApp)) {
+      state.targetApp = st.targetApp;
+    }
+    if (st.availability) {
+      state.targetAppAvailability = st.availability;
+    }
+    syncTargetAppUI();
+  });
+}
 
 if (api.onMagicCueStateChange) {
   api.onMagicCueStateChange((st) => {

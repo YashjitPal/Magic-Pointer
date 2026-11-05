@@ -11,6 +11,8 @@ let nativeWatcher = null;
 let isMagicPointerActive = false;
 let sensitivityLevel = 0;
 let isDarkMode = true;
+// Target AI Desktop App ('gemini' default; auto-switches to 'claude' or 'chatgpt' if Gemini is not installed)
+let targetApp = 'gemini';
 // MagicCue is bundled with the app (1.2 MB entity classifier pack) and enabled by default!
 let magicCueEnabled = true;
 // Optional Multimodal Vision + Suggestion AI (~500 MB total int8 ONNX):
@@ -67,10 +69,73 @@ function getLlmModelDirFileUrl() {
   return `file:///${llmModelsBaseDir.replace(/\\/g, '/')}/`;
 }
 
+function isTargetAppInstalled(id) {
+  try {
+    const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+    const winApps = path.join(localAppData, 'Microsoft', 'WindowsApps');
+    if (id === 'gemini') {
+      const candidates = [
+        path.join(localAppData, 'Google', 'Gemini', 'Gemini.exe'),
+        path.join(localAppData, 'Google', 'Gemini', 'GeminiAppLauncher.exe'),
+        path.join(localAppData, 'Programs', 'Gemini', 'Gemini.exe'),
+        path.join(localAppData, 'Gemini', 'Gemini.exe'),
+        'C:\\Program Files\\Google\\Gemini\\Gemini.exe',
+        'C:\\Program Files (x86)\\Google\\Gemini\\Gemini.exe'
+      ];
+      return candidates.some((p) => fs.existsSync(p));
+    }
+    if (id === 'claude') {
+      const candidates = [
+        path.join(winApps, 'claude-desktop.exe'),
+        path.join(localAppData, 'AnthropicClaude', 'claude.exe'),
+        path.join(localAppData, 'Programs', 'Claude', 'Claude.exe'),
+        path.join(localAppData, 'Programs', 'claude', 'claude.exe')
+      ];
+      return candidates.some((p) => fs.existsSync(p));
+    }
+    if (id === 'chatgpt') {
+      const candidates = [
+        path.join(winApps, 'chatgpt-desktop.exe'),
+        path.join(localAppData, 'Programs', 'ChatGPT', 'ChatGPT.exe'),
+        path.join(localAppData, 'ChatGPT', 'ChatGPT.exe'),
+        path.join(localAppData, 'OpenAI', 'ChatGPT', 'ChatGPT.exe')
+      ];
+      return candidates.some((p) => fs.existsSync(p));
+    }
+  } catch (_) {}
+  return false;
+}
+
+function getTargetAppsAvailability() {
+  return {
+    gemini: isTargetAppInstalled('gemini'),
+    claude: isTargetAppInstalled('claude'),
+    chatgpt: isTargetAppInstalled('chatgpt')
+  };
+}
+
+function resolveDefaultOrValidTargetApp(preferred = 'gemini') {
+  const avail = getTargetAppsAvailability();
+  const norm = ['gemini', 'claude', 'chatgpt'].includes(preferred) ? preferred : 'gemini';
+  if (avail[norm]) return norm;
+  // Default priority: Gemini -> Claude -> ChatGPT
+  if (avail.gemini) return 'gemini';
+  if (avail.claude) return 'claude';
+  if (avail.chatgpt) return 'chatgpt';
+  return norm;
+}
+
+function getTargetAppDisplayName(id) {
+  if (id === 'claude') return 'Claude';
+  if (id === 'chatgpt') return 'ChatGPT';
+  return 'Gemini';
+}
+
 function loadPersistedSettings() {
   try {
     llmModelDownloaded = checkLlmModelDownloaded();
     const cfgPath = path.join(app.getPath('userData'), 'magic_pointer_settings.json');
+    let savedTargetApp = 'gemini';
     if (fs.existsSync(cfgPath)) {
       const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
       if (typeof cfg.magicCueEnabled === 'boolean') {
@@ -79,8 +144,14 @@ function loadPersistedSettings() {
       if (typeof cfg.llmSuggestionsEnabled === 'boolean') {
         llmSuggestionsEnabled = cfg.llmSuggestionsEnabled && llmModelDownloaded;
       }
+      if (typeof cfg.targetApp === 'string' && ['gemini', 'claude', 'chatgpt'].includes(cfg.targetApp)) {
+        savedTargetApp = cfg.targetApp;
+      }
     }
-  } catch (_) {}
+    targetApp = resolveDefaultOrValidTargetApp(savedTargetApp);
+  } catch (_) {
+    targetApp = resolveDefaultOrValidTargetApp('gemini');
+  }
 }
 
 function savePersistedSettings() {
@@ -88,7 +159,7 @@ function savePersistedSettings() {
     const cfgPath = path.join(app.getPath('userData'), 'magic_pointer_settings.json');
     fs.writeFileSync(
       cfgPath,
-      JSON.stringify({ magicCueEnabled, llmSuggestionsEnabled, llmModelDownloaded }, null, 2),
+      JSON.stringify({ magicCueEnabled, llmSuggestionsEnabled, llmModelDownloaded, targetApp }, null, 2),
       'utf8'
     );
   } catch (_) {}
@@ -286,6 +357,8 @@ function activateMagicPointer(rawX, rawY, source = 'shake') {
     source,
     isDarkMode,
     sensitivityLevel,
+    targetApp,
+    targetAppAvailability: getTargetAppsAvailability(),
     magicCueEnabled,
     llmSuggestionsEnabled,
     llmModelDownloaded,
@@ -486,10 +559,36 @@ function createTray() {
       },
       { type: 'separator' },
       {
-        label: 'Open Gemini Desktop App (Companion Window)',
+        label: `Target AI App: ${getTargetAppDisplayName(targetApp)}`,
+        submenu: [
+          { id: 'gemini', name: 'Gemini (Default)' },
+          { id: 'claude', name: 'Claude' },
+          { id: 'chatgpt', name: 'ChatGPT (Chat Mode)' }
+        ].map((item) => {
+          const installed = isTargetAppInstalled(item.id);
+          return {
+            label: `${item.name}${installed ? ' · Installed' : ' · Not Installed'}`,
+            type: 'radio',
+            checked: targetApp === item.id,
+            click: () => {
+              targetApp = item.id;
+              savePersistedSettings();
+              if (overlayWindow && !overlayWindow.isDestroyed()) {
+                overlayWindow.webContents.send('magic-pointer:target-app', {
+                  targetApp,
+                  availability: getTargetAppsAvailability()
+                });
+              }
+              updateMenu();
+            }
+          };
+        })
+      },
+      {
+        label: `Open ${getTargetAppDisplayName(targetApp)} Desktop App (Companion Window)`,
         click: () => {
           const exePath = getNativeWatcherExePath();
-          spawn(exePath, ['--open-gemini-app'], { windowsHide: true });
+          spawn(exePath, ['--open-ai-app', targetApp], { windowsHide: true });
         }
       },
       { type: 'separator' },
@@ -668,8 +767,22 @@ ipcMain.handle('magic-pointer:pick-files', async () => {
 ipcMain.handle('magic-pointer:send-to-gemini', async (_event, payload) => {
   deactivateMagicPointer();
 
+  const resolvedApp = resolveDefaultOrValidTargetApp((payload && payload.targetApp) || targetApp);
+  if (resolvedApp !== targetApp) {
+    targetApp = resolvedApp;
+    savePersistedSettings();
+    if (updateTrayMenuFn) updateTrayMenuFn();
+    if (overlayWindow && !overlayWindow.isDestroyed()) {
+      overlayWindow.webContents.send('magic-pointer:target-app', {
+        targetApp,
+        availability: getTargetAppsAvailability()
+      });
+    }
+  }
+
   const payloadFile = path.join(os.tmpdir(), `magic_pointer_send_${Date.now()}.txt`);
   const lines = [];
+  lines.push(`TARGET_APP:${resolvedApp}`);
   const promptB64 = Buffer.from(payload.prompt || '', 'utf8').toString('base64');
   lines.push(`PROMPT_B64:${promptB64}`);
 
@@ -690,7 +803,34 @@ ipcMain.handle('magic-pointer:send-to-gemini', async (_event, payload) => {
     stdio: 'ignore'
   }).unref();
 
-  return { ok: true };
+  return { ok: true, targetApp: resolvedApp };
+});
+
+ipcMain.handle('magic-pointer:get-target-app', async () => {
+  targetApp = resolveDefaultOrValidTargetApp(targetApp);
+  return {
+    targetApp,
+    availability: getTargetAppsAvailability()
+  };
+});
+
+ipcMain.handle('magic-pointer:set-target-app', async (_event, nextApp) => {
+  if (typeof nextApp === 'string' && ['gemini', 'claude', 'chatgpt'].includes(nextApp)) {
+    targetApp = nextApp;
+    savePersistedSettings();
+    if (updateTrayMenuFn) updateTrayMenuFn();
+    if (overlayWindow && !overlayWindow.isDestroyed()) {
+      overlayWindow.webContents.send('magic-pointer:target-app', {
+        targetApp,
+        availability: getTargetAppsAvailability()
+      });
+    }
+  }
+  return {
+    ok: true,
+    targetApp,
+    availability: getTargetAppsAvailability()
+  };
 });
 
 ipcMain.handle('magic-pointer:get-magic-cue-state', async () => {

@@ -145,7 +145,7 @@
       <div id="fte-card" class="gpointer-topend-card fte-card" data-testid="fte-card">
         <!-- STEP 1: EnableMagicPointerScreen (lines 467-1095 of FirstTimeExperienceScreenKt.smali) -->
         <div id="fte-screen-enable-mp" class="fte-screen-step hidden">
-          <h2 class="dialog-title-large">Point to ask Gemini</h2>
+          <h2 id="fte-enable-mp-title" class="dialog-title-large">Point to ask Gemini</h2>
           <div class="spacer-20"></div>
           <div class="swatchie-banner-box" data-testid="pointer-swatchie-banner">
             <div id="lottie-pointer-banner" class="lottie-container"></div>
@@ -158,7 +158,7 @@
           <div class="spacer-24"></div>
           <div class="fte-feature-row">
             <img src="extracted_assets/svg/magic_pointer_icon.svg" alt="" class="fte-feature-icon" />
-            <p class="fte-feature-text">With Magic Pointer, point at or drag to select objects on your screen and get help from Gemini</p>
+            <p id="fte-enable-mp-desc" class="fte-feature-text">With Magic Pointer, point at or drag to select objects on your screen and get help from Gemini</p>
           </div>
           <div class="spacer-16"></div>
           <div class="fte-feature-row" data-testid="shortcut-row">
@@ -262,6 +262,25 @@
           </div>
 
           <div class="spacer-16"></div>
+          <!-- Target AI Desktop App Selector (Gemini default, auto-fallback to Claude or ChatGPT if Gemini is not installed) -->
+          <div id="target-app-settings-card" class="magic-cue-settings-card">
+            <div class="magic-cue-settings-info">
+              <div class="magic-cue-settings-title-row">
+                <span class="magic-cue-settings-title">Target AI Desktop App</span>
+                <span id="target-app-badge" class="magic-cue-badge installed">Gemini</span>
+              </div>
+              <p class="magic-cue-settings-desc">
+                Choose which desktop app opens in Companion Window mode when you send a prompt
+              </p>
+            </div>
+            <div class="target-app-Segmented-row" role="radiogroup" aria-label="Target AI Desktop App">
+              <button type="button" class="target-app-pill active" data-target-app="gemini">Gemini</button>
+              <button type="button" class="target-app-pill" data-target-app="claude">Claude</button>
+              <button type="button" class="target-app-pill" data-target-app="chatgpt">ChatGPT</button>
+            </div>
+          </div>
+
+          <div class="spacer-12"></div>
           <!-- Optional On-Device Suggestion LLM (LaMini-Flan-T5-77M int8 ONNX, ~92 MB) Toggle & On-Demand Download -->
           <div id="magic-cue-settings-card" class="magic-cue-settings-card">
             <div class="magic-cue-settings-header">
