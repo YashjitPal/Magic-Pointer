@@ -2863,7 +2863,7 @@ function clearTextSelectionActionsImmediate() {
     const p = iconTextSelCopy.querySelector('path');
     if (p) p.setAttribute('d', COPY_ICON_PATH_DEFAULT);
   }
-  if (hadPending && !state.isDraggingAOI && !state.isTextSelecting) {
+  if (hadPending && !state.isExiting && !state.isDraggingAOI && !state.isTextSelecting) {
     floatingAnchor.classList.remove('dragging-active');
     updateFloatingPromptBoxPosition(state.cursorX, state.cursorY, true);
   }
@@ -4541,6 +4541,13 @@ function playExitWithoutSavingAnimation() {
   state.isExiting = true;
   floatingAnchor.classList.remove('first-entry');
 
+  // If the Copy & Plus circles are open when exiting, animate them out alongside the exit
+  // while keeping the PromptBox hidden (`dragging-active`) so it doesn't flash in!
+  if (state.pendingTextSelection || state.textActionCircles.length > 0) {
+    state.pendingTextSelection = null;
+    dismissTextSelectionActions(true);
+  }
+
   // Clear any hovered AOI shader and restore normal cursor immediately on exit (MainScreenKt.java:55942)
   clearTimeout(state.hoverDelayTimer);
   state.hoveredAoi = null;
@@ -4579,6 +4586,7 @@ function playExitWithoutSavingAnimation() {
     // flashes back to opacity: 1 for a frame before the IPC round-trip completes!
     recordShakeDismissOnFinish();
     magicRoot.classList.add('hidden');
+    floatingAnchor.classList.remove('dragging-active');
     expandedStateWrapper.classList.remove('exiting-without-saving', 'exiting-empty-pill');
     promptBox.classList.remove('exiting-without-saving', 'exiting-empty-pill');
     promptBox.style.height = '';
@@ -4658,10 +4666,6 @@ function closeTopDialog() {
 function handleEscapePressed() {
   if (!state.active || state.isExiting) return;
   if (closeTopDialog()) return;
-  if (state.pendingTextSelection) {
-    dismissTextSelectionActions(true);
-    return;
-  }
   if ((state.aoiSelectionMode || state.isCollapsed) && state.selectedAOIs.length > 0) {
     // MainActivityPeer.java:1920: if in selection mode with selected AOIs, Esc returns to ExpandedState!
     state.selectingMoreScreen = false;
