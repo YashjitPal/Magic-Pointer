@@ -1407,9 +1407,28 @@ function reconstructSelectedOcrText(wrappers) {
 }
 
 function getSelectedTextAndGeometryFromPage(startX, startY, endX, endY) {
-  const textBlock = state.pageOcrBlock || (state.textSelectionAoi && state.textSelectionAoi.parsedText);
-  if (!textBlock || !Array.isArray(textBlock.lines) || !textBlock.lines.length) return null;
-  const symbols = state.pageOcrSymbols && state.pageOcrSymbols.length > 0 ? state.pageOcrSymbols : flattenOcrSymbols(textBlock);
+  const startBlock = state.textSelectionAoi && state.textSelectionAoi.parsedText;
+  const pageBlock = state.pageOcrBlock || startBlock;
+  if (!pageBlock || !Array.isArray(pageBlock.lines) || !pageBlock.lines.length) return null;
+
+  // Filter page lines so we only select lines in the SAME column (horizontally overlapping with the starting text block
+  // or the user's horizontal drag span). This prevents sidebar items or adjacent columns from ever stretching the
+  // selection rectangle across the entire horizontal width of the screen!
+  let colMinX = Math.min(startX, endX) - 24;
+  let colMaxX = Math.max(startX, endX) + 24;
+  if (startBlock && startBlock.boundingBox) {
+    colMinX = Math.min(colMinX, startBlock.boundingBox.left - 24);
+    colMaxX = Math.max(colMaxX, startBlock.boundingBox.right + 24);
+  }
+
+  const columnLines = pageBlock.lines.filter((line) => {
+    const lb = line && line.boundingBox;
+    if (!lb) return false;
+    return lb.right >= colMinX && lb.left <= colMaxX;
+  });
+
+  const activeBlock = columnLines.length > 0 ? { lines: columnLines } : (startBlock || pageBlock);
+  const symbols = flattenOcrSymbols(activeBlock);
   if (!symbols.length) return null;
   const sIdx = getInsertionPointIndexForOcr(symbols, startX, startY);
   const eIdx = getInsertionPointIndexForOcr(symbols, endX, endY);
@@ -1423,7 +1442,7 @@ function getSelectedTextAndGeometryFromPage(startX, startY, endX, endY) {
   let uLeft = Infinity, uTop = Infinity, uRight = -Infinity, uBottom = -Infinity;
   let lineStartIdx = 0;
 
-  for (const line of textBlock.lines) {
+  for (const line of activeBlock.lines) {
     const lineSymbols = [];
     for (const el of line.elements || []) {
       for (const sym of el.symbols || []) {
@@ -1830,11 +1849,31 @@ function redrawScrimCanvas() {
         12
       );
       ctx.fill();
-    } else if (livePageSel && livePageSel.rect) {
-      // Cutout & highlight the entire selected text area across the page!
-      const sr = livePageSel.rect;
+    } else if (state.isTextSelecting) {
+      // Point 4: While dragging to select text on the page, brighten ALL detected text blocks on the page
+      // by cutting out the dark tint over every OCR text block so all text appears in its normal bright color!
       ctx.globalCompositeOperation = 'destination-out';
       ctx.fillStyle = 'rgba(0, 0, 0, 1)';
+      for (const ocrAoi of state.ocrTextAOIs) {
+        const tr = ocrAoi.rect;
+        if (!tr) continue;
+        drawRoundedRectPath(
+          ctx,
+          tr.x - 6,
+          tr.y - 4,
+          tr.width + 12,
+          tr.height + 8,
+          8
+        );
+        ctx.fill();
+      }
+    } else if (state.pendingTextSelection && state.pendingTextSelection.rect) {
+      // Once text selection finishes, cutout & highlight the selected text area!
+      const sr = state.pendingTextSelection.rect;
+      const elapsedSel = Math.max(0, performance.now() - (state.pendingTextSelection.createdAt || performance.now()));
+      const cutoutAlpha = Math.min(1, elapsedSel / 250);
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.fillStyle = `rgba(0, 0, 0, ${cutoutAlpha.toFixed(3)})`;
       drawRoundedRectPath(
         ctx,
         sr.x - 8,
@@ -1916,9 +1955,16 @@ function renderFrame(now) {
     }
   }
 
-  // 2. AoiOverlayCanvas scrim is visible whenever Magic Pointer is active (fades in 100ms LinearEasing)
-  scrimCanvas.classList.add('visible');
-  if (state.scrimDirty || state.isDraggingAOI) redrawScrimCanvas();
+    // 2. AoiOverlayCanvas scrim is visible whenever Magic Pointer is active (fades in 160ms, fades out on exit)
+  if (!state.isExiting) {
+    scrimCanvas.classList.add('visible');
+  }
+  const hasAnimatingPendingSel =
+    state.pendingTextSelection &&
+    performance.now() - (state.pendingTextSelection.createdAt || 0) < 320;
+  if (state.scrimDirty || state.isDraggingAOI || state.isTextSelecting || hasAnimatingPendingSel) {
+    redrawScrimCanvas();
+  }
 
   // 3. Render WebGL2 EnergyShader using Scissor-accelerated regions
   if (gl && shaderProgram) {
@@ -1945,31 +1991,24 @@ function renderFrame(now) {
     const baseDotsColor = [0.659, 0.443, 0.961, 1.0]; // InternalEnergyShaderDotsConfig.DOTS_COLOR = Color.argb(168, 168, 113, 245)
 
     // 3a. AoiCard (AoiCardKt.java & AoiCardConfig.java):
-    //     Rendered in selection mode for either:
-    //     - Active drag selection (EffectState.LOOP: immediate cardAmbientConfig)
-    //     - Hovered non-fullscreen window AOI (EffectState.ENTRY: cardEntryConfig -> cardAmbientConfig over 500ms after ambientTransitionDelay)
-    //     Expanded by AOI_PADDING_DP = 8dp on each side (+16dp width/height), cornerRadius = 12dp.
+    //     - While actively text-selecting (`state.isTextSelecting`), the rectangular shader is HIDDEN!
+    //     - Once text selection finishes (`state.pendingTextSelection`), the rectangular shader reappears
+    //       over the selected text area with its 500ms in-animation (`entryP`: 0 -> 1), and then the Copy & Plus circles appear!
     const inSelection = state.aoiSelectionMode || state.isCollapsed || state.selectingMoreScreen || !!state.croppingAoiRect;
     const activeDragRect = state.isDraggingAOI
       ? constrainAoiRectToScreen(getNormalizedDragRect())
       : state.croppingAoiRect
         ? constrainAoiRectToScreen(state.croppingAoiRect)
         : null;
-    const livePageSelRect = state.isTextSelecting
-      ? (getSelectedTextAndGeometryFromPage(state.textSelStartX, state.textSelStartY, state.textSelEndX, state.textSelEndY) || {}).rect
-      : state.pendingTextSelection && state.pendingTextSelection.rect;
-    const activeHighlightRect = activeDragRect && activeDragRect.width > 6 && activeDragRect.height > 6
-      ? activeDragRect
-      : livePageSelRect;
 
-    if (activeHighlightRect && activeHighlightRect.width > 6 && activeHighlightRect.height > 6) {
+    if (activeDragRect && activeDragRect.width > 6 && activeDragRect.height > 6) {
       drawEnergyShape({
         baseTimeSec: t,
         timeOffsetSec: 1500.0,
-        cx: (activeHighlightRect.x + activeHighlightRect.width * 0.5) * dpr,
-        cy: (activeHighlightRect.y + activeHighlightRect.height * 0.5) * dpr,
-        w: (activeHighlightRect.width + 16) * dpr,
-        h: (activeHighlightRect.height + 16) * dpr,
+        cx: (activeDragRect.x + activeDragRect.width * 0.5) * dpr,
+        cy: (activeDragRect.y + activeDragRect.height * 0.5) * dpr,
+        w: (activeDragRect.width + 16) * dpr,
+        h: (activeDragRect.height + 16) * dpr,
         r: 12.0 * dpr,
         spread: 64.0 * dpr,
         panelAlpha: 0.0,
@@ -2010,7 +2049,62 @@ function renderFrame(now) {
         dotsWaveSpeed: 9.0,
         dotsYGradWeight: 0.0
       });
-    } else if (inSelection && state.renderedHoverAoi && state.renderedHoverAoi.rect && state.hoverCardAlpha > 0.01) {
+    } else if (!state.isTextSelecting && state.pendingTextSelection && state.pendingTextSelection.rect) {
+      // Point 1: After finishing text selection, reappear the rectangular AoiCard shader with its 500ms in-animation!
+      const sr = state.pendingTextSelection.rect;
+      const elapsedEntry = Math.max(0, now - (state.pendingTextSelection.createdAt || now));
+      const entryP = Math.min(1, elapsedEntry / 500);
+      const aMul = entryP;
+      if (aMul > 0.005) {
+        drawEnergyShape({
+          baseTimeSec: t,
+          timeOffsetSec: 1500.0,
+          cx: (sr.x + sr.width * 0.5) * dpr,
+          cy: (sr.y + sr.height * 0.5) * dpr,
+          w: (sr.width + 16) * dpr,
+          h: (sr.height + 16) * dpr,
+          r: 12.0 * dpr,
+          spread: 64.0 * dpr,
+          panelAlpha: 0.0,
+          panelTopBlur: 64.0 * dpr,
+          panelBottomBlur: 64.0 * dpr,
+          spotLightAlpha: 0.0,
+          borderAlpha1: aMul,
+          color1: inversePrimaryCol,
+          stroke1: 2.0 * dpr,
+          topBlur1: 7.0 * dpr,
+          bottomBlur1: 7.0 * dpr,
+          topIntensity1: 0.2,
+          bottomIntensity1: 0.2,
+          borderDistSpeed1: 0.0,
+          borderDistFreq1: 0.0,
+          borderDistAmp1: 0.0,
+          borderAlpha2: aMul,
+          color2: inversePrimaryCol,
+          stroke2: 3.0 * dpr,
+          topBlur2: 20.0 * dpr,
+          bottomBlur2: 20.0 * dpr,
+          topIntensity2: 0.2,
+          bottomIntensity2: 0.2,
+          borderDistSpeed2: 0.0,
+          borderDistFreq2: 0.0,
+          borderDistAmp2: 0.0,
+          dotsColor: primaryDotsCol,
+          dotsAlpha: aMul,
+          dotsGrid: lerp(4.5, 4.0, entryP) * dpr,
+          dotsMaxRadius: lerp(0.0, 0.4, entryP),
+          dotsMinRadius: -0.07,
+          dotsBlurRadius: 0.3,
+          dotsMoveStrength: 5.0,
+          dotsInnerStroke: lerp(0.0, 10.0, entryP) * dpr,
+          dotsOuterStroke: lerp(60.0, 50.0, entryP) * dpr,
+          dotsWaveAmp: 0.0,
+          dotsWaveFreq: 0.02,
+          dotsWaveSpeed: 9.0,
+          dotsYGradWeight: 0.0
+        });
+      }
+    } else if (!state.isTextSelecting && inSelection && state.renderedHoverAoi && state.renderedHoverAoi.rect && state.hoverCardAlpha > 0.01) {
       const hr = state.renderedHoverAoi.rect;
       const elapsedEntry = now - state.hoverEffectStartTime - state.hoverAmbientDelayMs;
       const entryP = elapsedEntry <= 0 ? 0 : Math.min(1, elapsedEntry / 500);
@@ -2798,7 +2892,8 @@ function dismissTextSelectionActions(animated = true, onDone = null) {
 
 function showTextSelectionActions(selectionObj) {
   if (!selectionObj || !selectionObj.rect || !selectionObj.text || !textSelectionActionsEl) return;
-  state.pendingTextSelection = selectionObj;
+  const now = performance.now();
+  state.pendingTextSelection = { ...selectionObj, createdAt: now };
   state.scrimDirty = true;
 
   if (iconTextSelCopy) {
@@ -2846,7 +2941,8 @@ function showTextSelectionActions(selectionObj) {
   textSelectionActionsEl.style.transform = `translate3d(${groupX.toFixed(1)}px, ${groupY.toFixed(1)}px, 0)`;
   textSelectionActionsEl.classList.remove('hidden');
 
-  const now = performance.now();
+  // Point 1: First let the rectangular AoiCard shader play its in-animation (starting at t=0),
+  // and then stagger the Copy & Plus circles in right after (starting at +180ms)!
   const btns = [btnTextSelCopy, btnTextSelAdd];
   state.textActionCircles = btns.map((btn, i) => {
     const contentEl = btn.querySelector('.text-sel-circle-content');
@@ -2860,13 +2956,13 @@ function showTextSelectionActions(selectionObj) {
       baseX: groupX + i * (circleSize + gap),
       baseY: groupY,
       size: circleSize,
-      delayUntil: now + i * 45,
+      delayUntil: now + 180 + i * 50,
       started: false,
       exiting: false,
       scale: 0.25,
       scaleVel: 0,
       alpha: 0,
-      alphaFromTime: now,
+      alphaFromTime: now + 180 + i * 50,
       timeOffsetSec: ((i * 4.13 + Math.random() * 5.87) % 10.0)
     };
   });
@@ -3992,9 +4088,10 @@ window.addEventListener('mouseup', async (e) => {
   state.scrimDirty = true;
 
   if (wasTextSelecting && textAoi) {
-    // Full-page OCR text selection: allows selecting text indefinitely across the entire page!
-    // Once released, highlights the entire selected text area with the AoiCard shader and shows
-    // the two circular Copy & Plus (+) action buttons next to the selection!
+    // Point 3: The Copy & Plus circle feature ONLY appears when nothing is already selected in the PromptBox
+    // (`state.selectedAOIs.length === 0 && !state.selectingMoreScreen`).
+    // If the user clicked the '+' button on the PromptBox (or already has items in the PromptBox),
+    // selecting text adds it directly to the PromptBox!
     const pageSel = getSelectedTextAndGeometryFromPage(
       state.textSelStartX,
       state.textSelStartY,
@@ -4002,7 +4099,29 @@ window.addEventListener('mouseup', async (e) => {
       state.textSelEndY
     );
     if (pageSel && pageSel.text && pageSel.text.trim()) {
-      showTextSelectionActions(pageSel);
+      const canShowCopyActions =
+        state.selectedAOIs.length === 0 &&
+        !state.selectingMoreScreen &&
+        !state.hasUserEnteredContentBefore &&
+        !e.ctrlKey &&
+        !state.ctrlPressed;
+
+      if (canShowCopyActions) {
+        showTextSelectionActions(pageSel);
+      } else {
+        await addSelectedTextCardToDraft(pageSel.text, { rect: pageSel.rect });
+        state.selectingMoreScreen = false;
+        updateFloatingPromptBoxPosition(e.clientX, e.clientY, true);
+        if (e.ctrlKey || state.ctrlPressed) {
+          state.multiAoiSelectionMode = true;
+          setExpandedState(false, { toFan: true });
+        } else {
+          state.multiAoiSelectionMode = false;
+          const wasCollapsedFan = state.isCollapsed;
+          setExpandedState(true, { skipFanAnim: wasCollapsedFan });
+        }
+        renderScreenAOICards();
+      }
     }
     floatingAnchor.classList.remove('dragging-active');
     return;
@@ -4050,19 +4169,9 @@ window.addEventListener('mouseup', async (e) => {
     if (state.aoiSelectionMode || state.isCollapsed || state.selectingMoreScreen) {
       if (state.hoveredAoi && state.hoveredAoi.rect && state.selectedAOIs.length < 10) {
         // MainScreenKt$mainScreenTapGestures$1$1.java:56665-56672:
-        // If clicking a text block, highlight the text block and show the Copy & Plus (+) action circles!
+        // Clicking a text block adds it directly to the PromptBox (Copy/Plus circles are only for drag-selecting text when nothing is selected)
         if (state.hoveredAoi.parsedText && state.hoveredAoi.parsedText.text) {
-          const blk = state.hoveredAoi.parsedText;
-          const lineRects = (blk.lines || [])
-            .map((l) => l.boundingBox)
-            .filter(Boolean);
-          showTextSelectionActions({
-            text: blk.text,
-            rect: state.hoveredAoi.rect,
-            lineRects
-          });
-          floatingAnchor.classList.remove('dragging-active');
-          return;
+          await addSelectedTextCardToDraft(state.hoveredAoi.parsedText.text, state.hoveredAoi);
         } else {
           const hRect = state.hoveredAoi.rect;
           state.croppingAoiRect = hRect;
@@ -4204,9 +4313,10 @@ if (btnTextSelCopy) {
       const p = iconTextSelCopy.querySelector('path');
       if (p) p.setAttribute('d', COPY_ICON_PATH_CHECK);
     }
-    setTimeout(() => {
-      dismissTextSelectionActions(true);
-    }, 120);
+    // Point 2: Once Copy is pressed, fade out the circles + scrim and turn off Magic Pointer!
+    dismissTextSelectionActions(true, () => {
+      playExitWithoutSavingAnimation();
+    });
   });
 }
 
@@ -4321,6 +4431,8 @@ function playSaveDraftAndExitAnimation() {
   state.exitFlightAlpha = 1.0;
 
   floatingAnchor.classList.add('exiting-saving-draft');
+  // Point 6: Smoothly fade out the translucent scrim tint when Magic Pointer exits!
+  scrimCanvas.classList.remove('visible');
   const t0 = performance.now();
 
   // CROS_STANDARD_ACCELERATION_EASING = cubic-bezier(0.4, 0.0, 1.0, 1.0)
@@ -4386,6 +4498,8 @@ function playExitWithoutSavingAnimation() {
   expandedStateWrapper.classList.add('exiting-without-saving');
   promptBox.classList.add('exiting-without-saving');
   promptBox.style.height = `${Math.max(0, startH - 48)}px`;
+  // Point 6: Smoothly fade out the translucent scrim tint when Magic Pointer exits!
+  scrimCanvas.classList.remove('visible');
   beginChipExit();
 
   setTimeout(() => {

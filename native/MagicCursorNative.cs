@@ -130,39 +130,47 @@ namespace MagicCursorNative
         static void HideWindowsSystemCursors()
         {
             if (SystemCursorsHidden) return;
-            try
+            SystemCursorsHidden = true;
+            ThreadPool.QueueUserWorkItem(_ =>
             {
-                // 32x32 1bpp mask: AND plane = all 0xFF (transparent), XOR plane = all 0x00
-                byte[] andPlane = new byte[128];
-                byte[] xorPlane = new byte[128];
-                for (int i = 0; i < 128; i++) andPlane[i] = 0xFF;
-
-                IntPtr blankCursor = CreateCursor(IntPtr.Zero, 0, 0, 32, 32, andPlane, xorPlane);
-                if (blankCursor != IntPtr.Zero)
+                try
                 {
-                    foreach (uint id in SYSTEM_CURSOR_IDS)
+                    if (BlankCursorAndPlane == null)
                     {
-                        IntPtr copy = CopyIcon(blankCursor);
-                        if (copy != IntPtr.Zero)
+                        BlankCursorAndPlane = new byte[128];
+                        BlankCursorXorPlane = new byte[128];
+                        for (int i = 0; i < 128; i++) BlankCursorAndPlane[i] = 0xFF;
+                    }
+                    IntPtr blankCursor = CreateCursor(IntPtr.Zero, 0, 0, 32, 32, BlankCursorAndPlane, BlankCursorXorPlane);
+                    if (blankCursor != IntPtr.Zero)
+                    {
+                        foreach (uint id in SYSTEM_CURSOR_IDS)
                         {
-                            SetSystemCursor(copy, id);
+                            if (!OverlayActive) break;
+                            IntPtr copy = CopyIcon(blankCursor);
+                            if (copy != IntPtr.Zero)
+                            {
+                                SetSystemCursor(copy, id);
+                            }
                         }
                     }
-                    SystemCursorsHidden = true;
                 }
-            }
-            catch { }
+                catch { }
+            });
         }
 
         static void RestoreWindowsSystemCursors()
         {
             if (!SystemCursorsHidden) return;
-            try
+            SystemCursorsHidden = false;
+            ThreadPool.QueueUserWorkItem(_ =>
             {
-                SystemParametersInfo(SPI_SETCURSORS, 0, IntPtr.Zero, 0);
-                SystemCursorsHidden = false;
-            }
-            catch { }
+                try
+                {
+                    SystemParametersInfo(SPI_SETCURSORS, 0, IntPtr.Zero, 0);
+                }
+                catch { }
+            });
         }
 
         static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
@@ -209,6 +217,22 @@ namespace MagicCursorNative
         static readonly object StdoutLock = new object();
         static Bitmap CachedDesktopBitmap = null;
         static string CachedScreenshotPath = Path.Combine(Path.GetTempPath(), "magic_pointer_latest_screenshot.jpg");
+        static byte[] BlankCursorAndPlane = null;
+        static byte[] BlankCursorXorPlane = null;
+        static OcrEngine CachedOcrEngine = null;
+
+        static OcrEngine GetOrCreateOcrEngine()
+        {
+            if (CachedOcrEngine == null)
+            {
+                try
+                {
+                    CachedOcrEngine = OcrEngine.TryCreateFromUserProfileLanguages();
+                }
+                catch { }
+            }
+            return CachedOcrEngine;
+        }
 
         static void EmitJsonLine(string line)
         {
@@ -553,7 +577,7 @@ namespace MagicCursorNative
         {
             try
             {
-                OcrEngine engine = OcrEngine.TryCreateFromUserProfileLanguages();
+                OcrEngine engine = GetOrCreateOcrEngine();
                 if (engine == null) return;
 
                 using (InMemoryRandomAccessStream stream = new InMemoryRandomAccessStream())
@@ -610,7 +634,7 @@ namespace MagicCursorNative
         {
             try
             {
-                OcrEngine engine = OcrEngine.TryCreateFromUserProfileLanguages();
+                OcrEngine engine = GetOrCreateOcrEngine();
                 if (engine == null) return "";
 
                 // Pad & upscale small crops (e.g. a single URL, email, or phone number selection)
@@ -888,7 +912,6 @@ namespace MagicCursorNative
                             if (long.TryParse(line.Substring("HWND:".Length).Trim(), out val))
                             {
                                 OverlayHwnd = new IntPtr(val);
-                                EnforceFullScreenOverlayBounds();
                             }
                         }
                         else if (line == "FOCUS")
@@ -898,7 +921,6 @@ namespace MagicCursorNative
                         else if (line == "SNAPSHOT")
                         {
                             UpdateCachedDesktopBitmap();
-                            EmitWindowAOIs();
                         }
                         else if (line == "GET_WINDOWS")
                         {
@@ -958,7 +980,6 @@ namespace MagicCursorNative
                     if (!OverlayActive)
                     {
                         UpdateCachedDesktopBitmap();
-                        EmitWindowAOIs();
                     }
                     EmitJsonLine(string.Format("{{\"type\":\"hotkey\",\"x\":{0},\"y\":{1}}}", pt.X, pt.Y));
                 }
@@ -1097,7 +1118,6 @@ namespace MagicCursorNative
                     {
                         // Fast ~6ms in-RAM BitBlt before overlay appears so crops are 100% clean
                         UpdateCachedDesktopBitmap();
-                        EmitWindowAOIs();
                     }
 
                     EmitJsonLine(string.Format("{{\"type\":\"shake\",\"x\":{0},\"y\":{1},\"reversals\":{2}}}", pt.X, pt.Y, totalReversals));

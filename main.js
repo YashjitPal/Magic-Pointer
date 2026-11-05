@@ -275,15 +275,10 @@ function activateMagicPointer(rawX, rawY, source = 'shake') {
   isMagicPointerActive = true;
   sendWatcherCommand('ACTIVE:1');
 
-  overlayWindow.setBounds({ x, y, width, height });
   overlayWindow.setIgnoreMouseEvents(false);
-  overlayWindow.setAlwaysOnTop(true, 'screen-saver', 1);
-  // Now that the frozen screenshot layer (<img id="screenshot-freeze-img">) is captured BEFORE
-  // the overlay appears, we can immediately give OS keyboard focus to the overlay window so
-  // the user can start typing a prompt right away without selecting an image first!
+  // Show and focus the already-fullscreen, already-alwaysOnTop overlay window with zero redundant DWM bounds/level calls!
   overlayWindow.show();
   overlayWindow.focus();
-  sendWatcherCommand('FOCUS');
 
   overlayWindow.webContents.send('magic-pointer:activate', {
     x: dipCursor.x,

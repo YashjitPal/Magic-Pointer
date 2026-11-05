@@ -118,7 +118,7 @@ button, textarea, input, div, a, span, canvas, img, svg, path, p, h1, h2, kbd {
 }
 
 /* ============================================================================
-   1. Fullscreen Scrim & Cutout Canvas (OVERLAY_ALPHA = 0.32f, 100ms fade-in)
+   1. Fullscreen Scrim & Cutout Canvas (OVERLAY_ALPHA = 0.32f, 150ms fade-in / fade-out)
    ============================================================================ */
 .scrim-canvas {
   position: absolute;
@@ -127,7 +127,7 @@ button, textarea, input, div, a, span, canvas, img, svg, path, p, h1, h2, kbd {
   height: 100%;
   z-index: 1;
   opacity: 0;
-  transition: opacity 100ms var(--linear-easing); /* OVERLAY_FADE_IN_DURATION_MS = 100ms */
+  transition: opacity 160ms var(--cros-standard-easing);
 }
 
 .scrim-canvas.visible {
