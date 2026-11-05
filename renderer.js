@@ -919,7 +919,15 @@ async function processScreenshotForMobileRaid(screenshotInfo) {
     try {
       const seq = ++visionWorkerSeq;
       const bitmap = await createImageBitmap(canvas);
-      worker.postMessage({ type: 'segment_screen', seq, bitmap }, [bitmap]);
+      const ocrBoxes = state.ocrTextAOIs.map((a) => ({
+        x: a.x,
+        y: a.y,
+        width: a.width,
+        height: a.height,
+        rect: a.rect,
+        category: 'TEXT'
+      }));
+      worker.postMessage({ type: 'segment_screen', seq, bitmap, ocrAois: ocrBoxes }, [bitmap]);
     } catch (err) {
       console.warn('processScreenshotForMobileRaid bitmap transfer error:', err);
     }
@@ -1069,8 +1077,9 @@ function processOcrResultIntoTextAOIs(ocrData) {
         });
       }
       if (elements.length === 0) continue;
-      // BottomBoundaryFilter.java: filter out taskbar bottom edge noise
-      if (lBottom >= screenH - 42 && lBottom - lTop < 26) continue;
+      // BottomBoundaryFilter.java:24-40 & 162-177:
+      // Only filters out lines where boundingBox.bottom >= screenHeight and confidence < 0.8f
+      if (lBottom >= screenH) continue;
       rawLines.push({
         text: elements.map((e) => e.text).join(' '),
         boundingBox: {
@@ -1246,6 +1255,26 @@ function processOcrResultIntoTextAOIs(ocrData) {
     text: block.text,
     parsedText: block
   }));
+
+  // Exact port of AOIDetectorImpl$init$processedAllDeferred$1.java:78-83:
+  // Send OCR TEXT bounding boxes to visionWorker so EdgeSnapPostProcessor.sideClamps
+  // clamps INTERACTABLE boxes from expanding into adjacent OCR text blocks!
+  const worker = getOrCreateVisionWorker();
+  if (worker && state.ocrTextAOIs.length > 0) {
+    const ocrBoxes = state.ocrTextAOIs.map((a) => ({
+      x: a.x,
+      y: a.y,
+      width: a.width,
+      height: a.height,
+      rect: a.rect,
+      category: 'TEXT'
+    }));
+    worker.postMessage({
+      type: 'reprocess_with_ocr',
+      seq: visionWorkerSeq,
+      ocrAois: ocrBoxes
+    });
+  }
 
   if (state.active) {
     if (!state.isDraggingAOI && !state.isTextSelecting) {
@@ -1510,11 +1539,13 @@ function getConsensusWindowAoiAt(cx, cy) {
   const inSelection = state.aoiSelectionMode || state.isCollapsed || state.selectingMoreScreen;
   if (!inSelection || state.isDraggingAOI) return null;
 
-  // Base AOIs = OCR Text AOIs + MobileRaid Screen Element AOIs + OS Floating Windows
+  // Exact port of AOIDetectorImpl.getBaseAOIs (AOIDetectorImpl.java:1224-1260) &
+  // RectRetrieverType.java:10 (ONLY 3 sources exist in Googlebook: ML_KIT_OCR + MOBILE_RAID_SCREEN_ELEMENT + MOBILE_RAID_COMMON_OBJECT;
+  // OS EnumWindows is NOT part of Googlebook's AOIDetectorImpl, as classId 704 of mobile_raid_v2_2_float32_finetuned_0804.tflite
+  // already detects WINDOW AOIs visually!):
   const baseAois = [
     ...state.ocrTextAOIs,
-    ...state.raidScreenElementAOIs,
-    ...state.detectedWindows.map((w) => ({ ...w, rect: { x: w.x, y: w.y, width: w.width, height: w.height } }))
+    ...state.raidScreenElementAOIs
   ];
 
   // 1. Default Phenotype flag 45823749 (CommonObjectFlagsImpl$FeatureModule.smali:51):

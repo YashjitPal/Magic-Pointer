@@ -91,12 +91,14 @@ function generalPostProcess(aois, imgWidth, imgHeight) {
   return out;
 }
 
-function computeSobelGradients(sourceBitmap, targetWidth = 720) {
+function computeSobelGradients(sourceBitmap) {
+  // Exact port of EdgeSnapPostProcessor.java:95 & 132:
+  // enableResize is false in EdgeSnapPostProcessor, so targetWidth = 0 -> originalWidth (scale = 1.0f)!
   const origW = sourceBitmap.width;
   const origH = sourceBitmap.height;
-  const scale = origW > targetWidth && targetWidth > 0 ? targetWidth / origW : 1.0;
-  const w = Math.max(4, Math.round(origW * scale));
-  const h = Math.max(4, Math.round(origH * scale));
+  const scale = 1.0;
+  const w = origW;
+  const h = origH;
 
   const workCanvas = new OffscreenCanvas(w, h);
   const ctx = workCanvas.getContext('2d', { willReadFrequently: true });
@@ -368,6 +370,10 @@ function runSegmenterOnBitmap(bitmap, modelType) {
   }
 }
 
+let latestScreenBitmap = null;
+let latestRawRaidAois = [];
+let latestOcrAois = [];
+
 self.onmessage = async (e) => {
   const msg = e.data;
   if (!msg) return;
@@ -384,12 +390,80 @@ self.onmessage = async (e) => {
       if (msg.bitmap && msg.bitmap.close) msg.bitmap.close();
       return;
     }
-    const aois = runSegmenterOnBitmap(msg.bitmap, 'SCREEN_ELEMENT');
-    msg.bitmap.close();
+    if (latestScreenBitmap && latestScreenBitmap.close) {
+      latestScreenBitmap.close();
+    }
+    latestScreenBitmap = msg.bitmap;
+    latestOcrAois = Array.isArray(msg.ocrAois) ? msg.ocrAois : [];
+
+    // AOIDetectorImpl.java:313-315:
+    // 1. processedRaidDeferred = detectionPostProcessor.postProcess(screenshot, raidDeferred)
+    // 2. If ocrAois are already present, processedAllDeferred = detectionPostProcessor.postProcess(screenshot, ocrAois + raidDeferred)
+    const detector = screenElementDetector;
+    const result = detector ? detector.detect(latestScreenBitmap) : null;
+    const detections = (result && result.detections) || [];
+    const rawRaid = [];
+    for (const det of detections) {
+      const box = det.boundingBox;
+      if (!box || box.width <= 0 || box.height <= 0) continue;
+      const cat = det.categories && det.categories[0];
+      const classId = cat && typeof cat.index === 'number' ? cat.index : -1;
+      const score = cat && typeof cat.score === 'number' ? cat.score : 0;
+      const label = (cat && cat.categoryName) || '';
+
+      let aoiCategory = null;
+      if (classId === 704 && score >= 0.8) {
+        aoiCategory = 'WINDOW';
+      } else if (classId === 706) {
+        aoiCategory = 'INTERACTABLE';
+      }
+      if (aoiCategory) {
+        const rx = Math.round(box.originX);
+        const ry = Math.round(box.originY);
+        const rw = Math.round(box.width);
+        const rh = Math.round(box.height);
+        rawRaid.push({
+          x: rx,
+          y: ry,
+          width: rw,
+          height: rh,
+          rect: { x: rx, y: ry, width: rw, height: rh },
+          label,
+          category: aoiCategory,
+          isCommonObjectAoi: false,
+          score
+        });
+      }
+    }
+    latestRawRaidAois = rawRaid;
+
+    const combinedRaw = latestOcrAois.length > 0 ? [...latestOcrAois, ...rawRaid] : rawRaid;
+    const genFiltered = generalPostProcess(combinedRaw, latestScreenBitmap.width, latestScreenBitmap.height);
+    const snapped = edgeSnapPostProcess(latestScreenBitmap, genFiltered);
+    const raidOnly = snapped.filter((a) => a.category !== 'TEXT');
+
     self.postMessage({
       type: 'screen_aois',
       seq: msg.seq,
-      aois
+      aois: raidOnly
+    });
+    return;
+  }
+
+  // Exact port of AOIDetectorImpl$init$processedAllDeferred$1.java:78-83:
+  // When OCR finishes, re-run detectionPostProcessor.postProcess(screenshot, ocrDeferred + raidDeferred)
+  // so EdgeSnapPostProcessor.sideClamps clamps INTERACTABLE boxes against OCR TEXT blockers!
+  if (msg.type === 'reprocess_with_ocr') {
+    latestOcrAois = Array.isArray(msg.ocrAois) ? msg.ocrAois : [];
+    if (!latestScreenBitmap || latestRawRaidAois.length === 0) return;
+    const combinedRaw = [...latestOcrAois, ...latestRawRaidAois];
+    const genFiltered = generalPostProcess(combinedRaw, latestScreenBitmap.width, latestScreenBitmap.height);
+    const snapped = edgeSnapPostProcess(latestScreenBitmap, genFiltered);
+    const raidOnly = snapped.filter((a) => a.category !== 'TEXT');
+    self.postMessage({
+      type: 'screen_aois',
+      seq: msg.seq,
+      aois: raidOnly
     });
     return;
   }
