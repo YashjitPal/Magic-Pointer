@@ -1431,9 +1431,13 @@ function getSelectedTextAndGeometryFromPage(startX, startY, endX, endY) {
   const pageBlock = state.pageOcrBlock || startBlock;
   if (!pageBlock || !Array.isArray(pageBlock.lines) || !pageBlock.lines.length) return null;
 
-  // Filter page lines so we only select lines in the SAME column (horizontally overlapping with the starting text block
-  // or the user's horizontal drag span). This prevents sidebar items or adjacent columns from ever stretching the
-  // selection rectangle across the entire horizontal width of the screen!
+  const selMinY = Math.min(startY, endY) - 18;
+  const selMaxY = Math.max(startY, endY) + 18;
+
+  // Filter page lines so we only select lines that:
+  // 1. Are in the SAME column (horizontally overlapping with the starting text block or horizontal drag span), AND
+  // 2. Vertically overlap the user's actual drag span `[min(startY, endY) - 18, max(startY, endY) + 18]`!
+  // This guarantees `getInsertionPointIndexForOcr` NEVER snaps to distant text blocks far above or below the drag!
   let colMinX = Math.min(startX, endX) - 24;
   let colMaxX = Math.max(startX, endX) + 24;
   if (startBlock && startBlock.boundingBox) {
@@ -1444,10 +1448,11 @@ function getSelectedTextAndGeometryFromPage(startX, startY, endX, endY) {
   const columnLines = pageBlock.lines.filter((line) => {
     const lb = line && line.boundingBox;
     if (!lb) return false;
-    return lb.right >= colMinX && lb.left <= colMaxX;
+    return lb.right >= colMinX && lb.left <= colMaxX && lb.bottom >= selMinY && lb.top <= selMaxY;
   });
 
-  const activeBlock = columnLines.length > 0 ? { lines: columnLines } : (startBlock || pageBlock);
+  if (columnLines.length === 0) return null;
+  const activeBlock = { lines: columnLines };
   const symbols = flattenOcrSymbols(activeBlock);
   if (!symbols.length) return null;
   const sIdx = getInsertionPointIndexForOcr(symbols, startX, startY);
@@ -4087,23 +4092,25 @@ function updateCursorTypeForTarget(target) {
   }
 }
 
-function findNearestOcrTextAoiAt(cx, cy, maxPad = 14) {
-  let best = null;
-  let bestDist = Infinity;
+// Strict text hit-test: checks if (cx, cy) is directly on (or within a tiny 3px glyph pad of)
+// an actual OCR text line (`line.boundingBox`), NOT the whitespace inside a large merged paragraph bounding box!
+function findDirectOcrTextAoiAtPoint(cx, cy, maxPad = 3) {
   for (const aoi of state.ocrTextAOIs) {
-    if (!aoi || !aoi.parsedText || !aoi.rect) continue;
-    const r = aoi.rect;
-    const dx = Math.max(0, r.x - cx, cx - (r.x + r.width));
-    const dy = Math.max(0, r.y - cy, cy - (r.y + r.height));
-    if (dx <= maxPad && dy <= maxPad) {
-      const d = Math.hypot(dx, dy);
-      if (d < bestDist) {
-        bestDist = d;
-        best = aoi;
+    if (!aoi || !aoi.parsedText || !Array.isArray(aoi.parsedText.lines)) continue;
+    for (const line of aoi.parsedText.lines) {
+      const lb = line && line.boundingBox;
+      if (!lb) continue;
+      if (
+        cx >= lb.left - maxPad &&
+        cx <= lb.right + maxPad &&
+        cy >= lb.top - maxPad &&
+        cy <= lb.bottom + maxPad
+      ) {
+        return aoi;
       }
     }
   }
-  return best;
+  return null;
 }
 
 function handleLocalPointerMove(e) {
@@ -4123,13 +4130,12 @@ function handleLocalPointerMove(e) {
     if (inSelection && !state.isDraggingAOI && !state.isTextSelecting) {
       const dist = Math.hypot(e.clientX - state.dragStartX, e.clientY - state.dragStartY);
       if (dist >= 4) {
-        // Use the text AOI captured at mousedown (or current/nearby text AOI) so moving 4px out of a word
-        // NEVER drops text-selection mode into rectangle-crop mode!
-        const startTextAoi =
-          (state.dragStartTextAoi && state.dragStartTextAoi.parsedText ? state.dragStartTextAoi : null) ||
-          (state.hoveredAoi && state.hoveredAoi.parsedText ? state.hoveredAoi : null) ||
-          findNearestOcrTextAoiAt(state.dragStartX, state.dragStartY, 18) ||
-          findNearestOcrTextAoiAt(e.clientX, e.clientY, 14);
+        // MainScreenKt$mainScreenDragGestures$1.java:56946-56952:
+        // ONLY enter text-selection mode if the user actually pressed mousedown directly on text!
+        // Never snap to nearby text if the user started dragging in empty space / over an image!
+        const startTextAoi = state.dragStartTextAoi && state.dragStartTextAoi.parsedText
+          ? state.dragStartTextAoi
+          : null;
         if (startTextAoi) {
           state.isTextSelecting = true;
           state.textSelectionAoi = startTextAoi;
@@ -4182,9 +4188,7 @@ scrimCanvas.addEventListener('mousedown', (e) => {
   state.isDraggingAOI = false;
   state.isTextSelecting = false;
   state.textSelectionAoi = null;
-  state.dragStartTextAoi =
-    (state.hoveredAoi && state.hoveredAoi.parsedText ? state.hoveredAoi : null) ||
-    findNearestOcrTextAoiAt(e.clientX, e.clientY, 18);
+  state.dragStartTextAoi = findDirectOcrTextAoiAtPoint(e.clientX, e.clientY, 3);
   state.dragStartX = e.clientX;
   state.dragStartY = e.clientY;
   state.dragCurrentX = e.clientX;
@@ -5362,11 +5366,9 @@ api.onCursorMove((data) => {
       if (inSelection && !state.isDraggingAOI && !state.isTextSelecting) {
         const dist = Math.hypot(data.x - state.dragStartX, data.y - state.dragStartY);
         if (dist >= 4) {
-          const startTextAoi =
-            (state.dragStartTextAoi && state.dragStartTextAoi.parsedText ? state.dragStartTextAoi : null) ||
-            (state.hoveredAoi && state.hoveredAoi.parsedText ? state.hoveredAoi : null) ||
-            findNearestOcrTextAoiAt(state.dragStartX, state.dragStartY, 18) ||
-            findNearestOcrTextAoiAt(data.x, data.y, 14);
+          const startTextAoi = state.dragStartTextAoi && state.dragStartTextAoi.parsedText
+            ? state.dragStartTextAoi
+            : null;
           if (startTextAoi) {
             state.isTextSelecting = true;
             state.textSelectionAoi = startTextAoi;
