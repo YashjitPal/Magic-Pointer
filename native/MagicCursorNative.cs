@@ -186,8 +186,18 @@ namespace MagicCursorNative
         static volatile bool OverlayActive = false;
         static IntPtr OverlayHwnd = IntPtr.Zero;
         static readonly object BitmapLock = new object();
+        static readonly object StdoutLock = new object();
         static Bitmap CachedDesktopBitmap = null;
         static string CachedScreenshotPath = Path.Combine(Path.GetTempPath(), "magic_pointer_latest_screenshot.jpg");
+
+        static void EmitJsonLine(string line)
+        {
+            lock (StdoutLock)
+            {
+                Console.Out.WriteLine(line);
+                Console.Out.Flush();
+            }
+        }
 
         static void EnforceFullScreenOverlayBounds()
         {
@@ -203,6 +213,7 @@ namespace MagicCursorNative
         [STAThread]
         static void Main(string[] args)
         {
+            Console.OutputEncoding = Encoding.UTF8;
             SetProcessDPIAware();
 
             if (args.Length > 0 && args[0] == "--capture")
@@ -464,8 +475,7 @@ namespace MagicCursorNative
                         if (pngBytes != null)
                         {
                             File.WriteAllBytes(CachedScreenshotPath, pngBytes);
-                            Console.WriteLine(string.Format("{{\"type\":\"screenshot\",\"path\":\"{0}\",\"width\":{1},\"height\":{2}}}", EscapeJson(CachedScreenshotPath), sw, sh));
-                            Console.Out.Flush();
+                            EmitJsonLine(string.Format("{{\"type\":\"screenshot\",\"path\":\"{0}\",\"width\":{1},\"height\":{2}}}", EscapeJson(CachedScreenshotPath), sw, sh));
                             RunWinRtOcrOnPngBytes(pngBytes, sw, sh);
                         }
                     }
@@ -540,8 +550,7 @@ namespace MagicCursorNative
                             sb.Append("]}");
                         }
                         sb.Append("]}");
-                        Console.WriteLine(sb.ToString());
-                        Console.Out.Flush();
+                        EmitJsonLine(sb.ToString());
                     }
                 }
             }
@@ -555,11 +564,39 @@ namespace MagicCursorNative
                 OcrEngine engine = OcrEngine.TryCreateFromUserProfileLanguages();
                 if (engine == null) return "";
 
+                // Pad & upscale small crops (e.g. a single URL, email, or phone number selection)
+                // so Windows OcrEngine never fails or misreads characters due to tight edges or small font height!
+                int scale = (bmp.Height < 120 || bmp.Width < 260) ? 2 : 1;
+                int pad = 24;
+                int targetW = bmp.Width * scale + pad * 2;
+                int targetH = bmp.Height * scale + pad * 2;
+
                 byte[] pngBytes;
-                using (MemoryStream ms = new MemoryStream())
+                using (Bitmap padded = new Bitmap(targetW, targetH, PixelFormat.Format32bppArgb))
                 {
-                    bmp.Save(ms, ImageFormat.Png);
-                    pngBytes = ms.ToArray();
+                    Color edgeBg = Color.White;
+                    try
+                    {
+                        Color c1 = bmp.GetPixel(Math.Min(2, bmp.Width - 1), Math.Min(2, bmp.Height - 1));
+                        Color c2 = bmp.GetPixel(Math.Max(0, bmp.Width - 3), Math.Max(0, bmp.Height - 3));
+                        edgeBg = Color.FromArgb(255, (c1.R + c2.R) / 2, (c1.G + c2.G) / 2, (c1.B + c2.B) / 2);
+                    }
+                    catch { }
+
+                    using (Graphics g = Graphics.FromImage(padded))
+                    {
+                        g.SmoothingMode = SmoothingMode.HighQuality;
+                        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                        g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                        g.Clear(edgeBg);
+                        g.DrawImage(bmp, new Rectangle(pad, pad, bmp.Width * scale, bmp.Height * scale));
+                    }
+
+                    using (MemoryStream ms = new MemoryStream())
+                    {
+                        padded.Save(ms, ImageFormat.Png);
+                        pngBytes = ms.ToArray();
+                    }
                 }
 
                 using (InMemoryRandomAccessStream stream = new InMemoryRandomAccessStream())
@@ -584,7 +621,7 @@ namespace MagicCursorNative
                         {
                             if (line != null && !string.IsNullOrWhiteSpace(line.Text))
                             {
-                                if (sb.Length > 0) sb.Append(" ");
+                                if (sb.Length > 0) sb.Append("\n");
                                 sb.Append(line.Text.Trim());
                             }
                         }
@@ -600,48 +637,48 @@ namespace MagicCursorNative
 
         static void CropFromMemoryOrScreen(string reqId, int x, int y, int w, int h, string outPath)
         {
-            try
+            ThreadPool.QueueUserWorkItem(_ =>
             {
-                string cropOcrText = "";
-                lock (BitmapLock)
+                try
                 {
-                    if (CachedDesktopBitmap != null)
+                    Bitmap croppedCopy = null;
+                    lock (BitmapLock)
                     {
-                        int rx = Math.Max(0, Math.Min(x, CachedDesktopBitmap.Width - 4));
-                        int ry = Math.Max(0, Math.Min(y, CachedDesktopBitmap.Height - 4));
-                        int rw = Math.Max(4, Math.Min(w, CachedDesktopBitmap.Width - rx));
-                        int rh = Math.Max(4, Math.Min(h, CachedDesktopBitmap.Height - ry));
-                        Rectangle rect = new Rectangle(rx, ry, rw, rh);
-                        using (Bitmap crop = CachedDesktopBitmap.Clone(rect, CachedDesktopBitmap.PixelFormat))
+                        if (CachedDesktopBitmap != null)
                         {
-                            crop.Save(outPath, ImageFormat.Png);
-                            cropOcrText = RecognizeTextFromBitmapSync(crop);
+                            int rx = Math.Max(0, Math.Min(x, CachedDesktopBitmap.Width - 4));
+                            int ry = Math.Max(0, Math.Min(y, CachedDesktopBitmap.Height - 4));
+                            int rw = Math.Max(4, Math.Min(w, CachedDesktopBitmap.Width - rx));
+                            int rh = Math.Max(4, Math.Min(h, CachedDesktopBitmap.Height - ry));
+                            Rectangle rect = new Rectangle(rx, ry, rw, rh);
+                            croppedCopy = CachedDesktopBitmap.Clone(rect, CachedDesktopBitmap.PixelFormat);
                         }
-                        Console.WriteLine(string.Format("{{\"type\":\"cropped\",\"id\":\"{0}\",\"ok\":true,\"ocrText\":\"{1}\"}}", reqId, EscapeJson(cropOcrText)));
-                        Console.Out.Flush();
-                        return;
                     }
-                }
 
-                // Fallback to direct screen capture
-                Rectangle fallbackRect = new Rectangle(x, y, Math.Max(4, w), Math.Max(4, h));
-                using (Bitmap bmp = new Bitmap(fallbackRect.Width, fallbackRect.Height, PixelFormat.Format32bppArgb))
-                {
-                    using (Graphics g = Graphics.FromImage(bmp))
+                    if (croppedCopy == null)
                     {
-                        g.CopyFromScreen(fallbackRect.Left, fallbackRect.Top, 0, 0, fallbackRect.Size, CopyPixelOperation.SourceCopy);
+                        Rectangle fallbackRect = new Rectangle(x, y, Math.Max(4, w), Math.Max(4, h));
+                        croppedCopy = new Bitmap(fallbackRect.Width, fallbackRect.Height, PixelFormat.Format32bppArgb);
+                        using (Graphics g = Graphics.FromImage(croppedCopy))
+                        {
+                            g.CopyFromScreen(fallbackRect.Left, fallbackRect.Top, 0, 0, fallbackRect.Size, CopyPixelOperation.SourceCopy);
+                        }
                     }
-                    bmp.Save(outPath, ImageFormat.Png);
-                    cropOcrText = RecognizeTextFromBitmapSync(bmp);
+
+                    string cropOcrText = "";
+                    using (croppedCopy)
+                    {
+                        croppedCopy.Save(outPath, ImageFormat.Png);
+                        cropOcrText = RecognizeTextFromBitmapSync(croppedCopy);
+                    }
+
+                    EmitJsonLine(string.Format("{{\"type\":\"cropped\",\"id\":\"{0}\",\"ok\":true,\"ocrText\":\"{1}\"}}", reqId, EscapeJson(cropOcrText)));
                 }
-                Console.WriteLine(string.Format("{{\"type\":\"cropped\",\"id\":\"{0}\",\"ok\":true,\"ocrText\":\"{1}\"}}", reqId, EscapeJson(cropOcrText)));
-                Console.Out.Flush();
-            }
-            catch
-            {
-                Console.WriteLine(string.Format("{{\"type\":\"cropped\",\"id\":\"{0}\",\"ok\":false}}", reqId));
-                Console.Out.Flush();
-            }
+                catch
+                {
+                    EmitJsonLine(string.Format("{{\"type\":\"cropped\",\"id\":\"{0}\",\"ok\":false}}", reqId));
+                }
+            });
         }
 
         static void CaptureScreenToFile(Rectangle rect, string outPath)
@@ -663,7 +700,23 @@ namespace MagicCursorNative
         static string EscapeJson(string s)
         {
             if (string.IsNullOrEmpty(s)) return "";
-            return s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", " ").Replace("\n", " ");
+            StringBuilder sb = new StringBuilder(s.Length + 8);
+            foreach (char c in s)
+            {
+                if (c == '\\') sb.Append("\\\\");
+                else if (c == '"') sb.Append("\\\"");
+                else if (c == '\r' || c == '\n' || c == '\t') sb.Append(' ');
+                else if (c < 0x20 || (c >= 0x7F && c <= 0x9F))
+                {
+                    // Strip control characters (like \u0007 bullet noise from OCR) so JSON.parse never fails!
+                    continue;
+                }
+                else
+                {
+                    sb.Append(c);
+                }
+            }
+            return sb.ToString();
         }
 
         static void EmitWindowAOIs()
@@ -739,8 +792,7 @@ namespace MagicCursorNative
                 }, IntPtr.Zero);
 
                 json.Append("]}");
-                Console.WriteLine(json.ToString());
-                Console.Out.Flush();
+                EmitJsonLine(json.ToString());
             }
             catch { }
         }
@@ -852,8 +904,7 @@ namespace MagicCursorNative
                         UpdateCachedDesktopBitmap();
                         EmitWindowAOIs();
                     }
-                    Console.WriteLine(string.Format("{{\"type\":\"hotkey\",\"x\":{0},\"y\":{1}}}", pt.X, pt.Y));
-                    Console.Out.Flush();
+                    EmitJsonLine(string.Format("{{\"type\":\"hotkey\",\"x\":{0},\"y\":{1}}}", pt.X, pt.Y));
                 }
                 prevWinGDown = winGDown;
 
@@ -863,15 +914,13 @@ namespace MagicCursorNative
                     bool escDown = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
                     if (escDown && !prevEscDown)
                     {
-                        Console.WriteLine("{\"type\":\"esc\"}");
-                        Console.Out.Flush();
+                        EmitJsonLine("{\"type\":\"esc\"}");
                     }
                     prevEscDown = escDown;
 
                     if (pt.X != prevPt.X || pt.Y != prevPt.Y)
                     {
-                        Console.WriteLine(string.Format("{{\"type\":\"move\",\"x\":{0},\"y\":{1}}}", pt.X, pt.Y));
-                        Console.Out.Flush();
+                        EmitJsonLine(string.Format("{{\"type\":\"move\",\"x\":{0},\"y\":{1}}}", pt.X, pt.Y));
                     }
                 }
                 else
@@ -952,8 +1001,7 @@ namespace MagicCursorNative
                         EmitWindowAOIs();
                     }
 
-                    Console.WriteLine(string.Format("{{\"type\":\"shake\",\"x\":{0},\"y\":{1},\"reversals\":{2}}}", pt.X, pt.Y, totalReversals));
-                    Console.Out.Flush();
+                    EmitJsonLine(string.Format("{{\"type\":\"shake\",\"x\":{0},\"y\":{1},\"reversals\":{2}}}", pt.X, pt.Y, totalReversals));
                 }
 
                 prevPt = pt;

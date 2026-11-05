@@ -1001,17 +1001,29 @@ function processOcrResultIntoTextAOIs(ocrData) {
 
   for (const rawLine of ocrData.lines) {
     if (!rawLine || !Array.isArray(rawLine.words) || rawLine.words.length === 0) continue;
-    // LineSplitRule.java:46: lineSplitThresholdMultiplier = 4.0f
+    // Exact port of LineSplitRule.java:46 & 273-295:
+    // lineSplitThresholdMultiplier = 4.0f * max(dim1, avgCharDim)
     const sortedWords = [...rawLine.words].sort((a, b) => a.x - b.x);
+    let totalCharW = 0;
+    let totalChars = 0;
+    for (const w of sortedWords) {
+      const len = Math.max(1, Array.from(w.text || '').length);
+      totalCharW += Math.max(2, w.w);
+      totalChars += len;
+    }
+    const avgCharDim = totalChars > 0 ? totalCharW / totalChars : 10;
+
     let currentGroup = [sortedWords[0]];
     const splitLineGroups = [currentGroup];
 
     for (let i = 1; i < sortedWords.length; i++) {
       const prev = sortedWords[i - 1];
       const curr = sortedWords[i];
-      const avgH = (prev.h + curr.h) * 0.5;
+      const prevChars = Math.max(1, Array.from(prev.text || '').length);
+      const dim1 = Math.max(2, prev.w) / prevChars;
       const gap = curr.x - (prev.x + prev.w);
-      if (gap > avgH * 2.2) {
+      const splitThreshold = 4.0 * Math.max(dim1, avgCharDim);
+      if (gap > splitThreshold) {
         currentGroup = [curr];
         splitLineGroups.push(currentGroup);
       } else {
@@ -1076,42 +1088,147 @@ function processOcrResultIntoTextAOIs(ocrData) {
     }
   }
 
-  // PqHeuristicClusteringRule.java: cluster horizontally aligned & vertically adjacent lines into OcrTextBlocks
-  rawLines.sort((a, b) => a.boundingBox.top - b.boundingBox.top || a.boundingBox.left - b.boundingBox.left);
-  const blocks = [];
-  for (const line of rawLines) {
-    let merged = false;
-    for (const blk of blocks) {
-      const br = blk.boundingBox;
-      const lr = line.boundingBox;
-      const avgH = (br.height / Math.max(1, blk.lines.length) + lr.height) * 0.5;
-      const vGap = lr.top - br.bottom;
-      const hOverlap = Math.min(br.right, lr.right) - Math.max(br.left, lr.left);
-      const leftAligned = Math.abs(br.left - lr.left) <= Math.max(24, avgH * 1.5);
-      const heightSimilar = Math.min(lr.height, avgH) / Math.max(lr.height, avgH) >= 0.5;
-      if (vGap >= -avgH * 0.4 && vGap <= avgH * 1.1 && (hOverlap > 0 || leftAligned) && heightSimilar) {
-        blk.lines.push(line);
-        br.left = Math.min(br.left, lr.left);
-        br.top = Math.min(br.top, lr.top);
-        br.right = Math.max(br.right, lr.right);
-        br.bottom = Math.max(br.bottom, lr.bottom);
-        br.x = br.left;
-        br.y = br.top;
-        br.width = br.right - br.left;
-        br.height = br.bottom - br.top;
-        blk.text = blk.lines.map((l) => l.text).join('\n');
-        merged = true;
-        break;
+  // Exact port of HeuristicClusteringRule.java (enabled by default in OcrClusterFlagsImpl.smali:51 where 45841355 = FALSE):
+  // - ALIGNMENT_HEIGHT_RATIO = 0.5f
+  // - OVERLAP_THRESHOLD = 0.1f
+  // - ALIGNMENT_TOLERANCE = 0.05f
+  // - VERT_GAP_LIMIT = 1.5f
+  const ALIGNMENT_HEIGHT_RATIO = 0.5;
+  const OVERLAP_THRESHOLD = 0.1;
+  const ALIGNMENT_TOLERANCE = 0.05;
+  const VERT_GAP_LIMIT = 1.5;
+
+  let activeGroups = rawLines.map((line, idx) => ({
+    indices: new Set([idx]),
+    rect: { ...line.boundingBox },
+    meanCharHeight: Math.max(2, line.boundingBox.height)
+  }));
+
+  activeGroups.sort((a, b) => a.rect.top - b.rect.top);
+
+  function canMergePairwise(g1, g2) {
+    const h1 = g1.meanCharHeight;
+    const h2 = g2.meanCharHeight;
+    if (Math.min(h1, h2) / Math.max(h1, h2) < ALIGNMENT_HEIGHT_RATIO) return false;
+    const r1 = g1.rect;
+    const r2 = g2.rect;
+    if (r1.left > r2.right || r2.left > r1.right) return false;
+    const centerX1 = (r1.left + r1.right) * 0.5;
+    const centerX2 = (r2.left + r2.right) * 0.5;
+    const xAlignDiff = Math.min(
+      Math.abs(r1.left - r2.left),
+      Math.min(Math.round(Math.abs(centerX1 - centerX2)), Math.abs(r1.right - r2.right))
+    );
+    const maxAllowedAlignDiff = Math.max(r1.width, r2.width) * ALIGNMENT_TOLERANCE;
+    if (xAlignDiff >= maxAllowedAlignDiff) return false;
+    const gapY = Math.max(0, Math.max(r1.top, r2.top) - Math.min(r1.bottom, r2.bottom));
+    return gapY < Math.max(h1, h2) * VERT_GAP_LIMIT;
+  }
+
+  function unionRects(r1, r2) {
+    const left = Math.min(r1.left, r2.left);
+    const top = Math.min(r1.top, r2.top);
+    const right = Math.max(r1.right, r2.right);
+    const bottom = Math.max(r1.bottom, r2.bottom);
+    return { left, top, right, bottom, x: left, y: top, width: right - left, height: bottom - top };
+  }
+
+  function overlapsWithOtherGroups(newRect, newIndices, list, skipI, skipJ) {
+    for (let k = 0; k < list.length; k++) {
+      if (k === skipI || k === skipJ) continue;
+      const other = list[k];
+      let sharesIdx = false;
+      for (const idx of other.indices) {
+        if (newIndices.has(idx)) {
+          sharesIdx = true;
+          break;
+        }
+      }
+      if (sharesIdx) continue;
+      const il = Math.max(newRect.left, other.rect.left);
+      const it = Math.max(newRect.top, other.rect.top);
+      const ir = Math.min(newRect.right, other.rect.right);
+      const ib = Math.min(newRect.bottom, other.rect.bottom);
+      if (ir > il && ib > it) {
+        const interArea = (ir - il) * (ib - it);
+        const otherArea = other.rect.width * other.rect.height;
+        if (otherArea > 0 && interArea / otherArea > OVERLAP_THRESHOLD) {
+          return true;
+        }
       }
     }
-    if (!merged) {
-      const b = { ...line.boundingBox };
-      blocks.push({
-        text: line.text,
-        boundingBox: b,
-        lines: [line]
-      });
+    return false;
+  }
+
+  let mergedAny = true;
+  while (mergedAny) {
+    mergedAny = false;
+    const nextList = [];
+    const mergedIndices = new Set();
+    const numElements = activeGroups.length;
+    for (let i = 0; i < numElements; i++) {
+      if (mergedIndices.has(i)) continue;
+      const lhs = activeGroups[i];
+      const gapLimit = (VERT_GAP_LIMIT / ALIGNMENT_TOLERANCE) * lhs.meanCharHeight;
+      let lhsMerged = false;
+      for (let j = i + 1; j < numElements; j++) {
+        if (mergedIndices.has(j)) continue;
+        const rhs = activeGroups[j];
+        const gap = rhs.rect.top - lhs.rect.bottom;
+        if (gap <= gapLimit && canMergePairwise(lhs, rhs)) {
+          const newIndices = new Set([...lhs.indices, ...rhs.indices]);
+          const unionR = unionRects(lhs.rect, rhs.rect);
+          if (!overlapsWithOtherGroups(unionR, newIndices, activeGroups, i, j)) {
+            const newMeanCharHeight =
+              (lhs.indices.size * lhs.meanCharHeight + rhs.indices.size * rhs.meanCharHeight) / newIndices.size;
+            nextList.push({
+              indices: newIndices,
+              rect: unionR,
+              meanCharHeight: newMeanCharHeight
+            });
+            mergedIndices.add(i);
+            mergedIndices.add(j);
+            lhsMerged = true;
+            mergedAny = true;
+            break;
+          }
+        }
+      }
+      if (!lhsMerged) {
+        nextList.push(lhs);
+      }
     }
+    activeGroups = nextList;
+  }
+
+  const blocks = [];
+  for (const grp of activeGroups) {
+    const groupLines = Array.from(grp.indices)
+      .map((idx) => rawLines[idx])
+      .filter(Boolean)
+      .sort((a, b) => a.boundingBox.top - b.boundingBox.top);
+    if (groupLines.length === 0) continue;
+    let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+    for (const l of groupLines) {
+      left = Math.min(left, l.boundingBox.left);
+      top = Math.min(top, l.boundingBox.top);
+      right = Math.max(right, l.boundingBox.right);
+      bottom = Math.max(bottom, l.boundingBox.bottom);
+    }
+    blocks.push({
+      text: groupLines.map((l) => l.text).join('\n'),
+      boundingBox: {
+        left,
+        top,
+        right,
+        bottom,
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top
+      },
+      lines: groupLines
+    });
   }
 
   state.ocrTextAOIs = blocks.map((block) => ({
@@ -1400,30 +1517,32 @@ function getConsensusWindowAoiAt(cx, cy) {
     ...state.detectedWindows.map((w) => ({ ...w, rect: { x: w.x, y: w.y, width: w.width, height: w.height } }))
   ];
 
-  // 1. Find all WINDOW / INTERACTABLE base AOIs containing cursor sorted by area ascending,
-  //    cancel pending 500ms segmentation jobs outside active rects, and trigger segmentation on smallest!
-  const containingScreenElements = baseAois
-    .filter((a) => (a.category === 'WINDOW' || a.category === 'INTERACTABLE') && a.rect &&
-      cx >= a.rect.x && cx <= a.rect.x + a.rect.width && cy >= a.rect.y && cy <= a.rect.y + a.rect.height)
-    .sort((a, b) => (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height));
-
-  const activeKeys = new Set(containingScreenElements.map((a) => rectKey(a.rect)));
-  for (const [k, timerId] of state.segmentingScreenElementTimers.entries()) {
-    if (!activeKeys.has(k)) {
-      clearTimeout(timerId);
-      state.segmentingScreenElementTimers.delete(k);
-    }
-  }
-  if (containingScreenElements.length > 0) {
-    triggerScreenElementSegmentation(containingScreenElements[0]);
-  }
-
-  // 2. Gather sub-AOIs from any already-segmented screen elements containing the cursor
+  // 1. Default Phenotype flag 45823749 (CommonObjectFlagsImpl$FeatureModule.smali:51):
+  //    enableCommonObjectAoi = FALSE by default in Googlebook APK!
+  const enableCommonObjectAoi = false;
   const subAois = [];
-  for (const [k, list] of state.segmentedScreenElements.entries()) {
-    const [rx, ry, rw, rh] = k.split(',').map(Number);
-    if (cx >= rx && cx <= rx + rw && cy >= ry && cy <= ry + rh) {
-      subAois.push(...list);
+  if (enableCommonObjectAoi) {
+    const containingScreenElements = baseAois
+      .filter((a) => (a.category === 'WINDOW' || a.category === 'INTERACTABLE') && a.rect &&
+        cx >= a.rect.x && cx <= a.rect.x + a.rect.width && cy >= a.rect.y && cy <= a.rect.y + a.rect.height)
+      .sort((a, b) => (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height));
+
+    const activeKeys = new Set(containingScreenElements.map((a) => rectKey(a.rect)));
+    for (const [k, timerId] of state.segmentingScreenElementTimers.entries()) {
+      if (!activeKeys.has(k)) {
+        clearTimeout(timerId);
+        state.segmentingScreenElementTimers.delete(k);
+      }
+    }
+    if (containingScreenElements.length > 0) {
+      triggerScreenElementSegmentation(containingScreenElements[0]);
+    }
+
+    for (const [k, list] of state.segmentedScreenElements.entries()) {
+      const [rx, ry, rw, rh] = k.split(',').map(Number);
+      if (cx >= rx && cx <= rx + rw && cy >= ry && cy <= ry + rh) {
+        subAois.push(...list);
+      }
     }
   }
 
@@ -2761,16 +2880,21 @@ const MAGIC_CUE_ICONS = {
 
 function getMagicCueSuggestionsForOcrText(rawText) {
   // Bundled MagicCue entity classifier (enabled by default; can be toggled in Tray)
+  // Exact port of MagicCueImpl.java + TextClassifier RemoteActions (email, url, address, datetime, flight, phone)
   if (!state.magicCueEnabled) return [];
   const text = (rawText || '').trim();
   if (!text) return [];
 
-  // Normalize common OCR spacing artifacts around slashes and dots in URLs/emails
+  // Normalize common WinRT OCR spacing/character artifacts in URLs & emails:
+  // - spaces around "://", "www.", "@", "/", and ".tld"
+  const TLDS = 'com|org|net|edu|gov|mil|io|dev|ai|co|app|me|gg|tv|xyz|info|biz|tech|cloud|page|site|store|online|live|pro|design|studio|us|uk|in|ca|de|fr|jp|au|eu|nl|ch|se|es|it|br|kr|tw|sg|hk|nz';
   const normalizedUrlText = text
-    .replace(/(https?)\s*:\s*\/\s*\/\s*/gi, '$1://')
+    .replace(/(https?)\s*[:;]\s*\/\s*\/\s*/gi, '$1://')
     .replace(/\b(www)\s*\.\s*/gi, 'www.')
-    .replace(/([a-z0-9-]+)\s*\.\s*(com|org|net|edu|gov|io|dev|ai|co|app|me|gg|tv|xyz|info|uk|in|ca|de|fr|jp)\b/gi, '$1.$2')
-    .replace(/(\.(?:com|org|net|edu|gov|io|dev|ai|co|app|me|gg|tv|xyz))\s*\/\s*([a-z0-9_-]+)/gi, '$1/$2');
+    .replace(/([a-z0-9._%+-]+)\s*@\s*([a-z0-9.-]+)\s*\.\s*([a-z]{2,})/gi, '$1@$2.$3')
+    .replace(new RegExp(`([a-z0-9-]+)\\s*\\.\\s*(${TLDS})(?=\\b|\\/|\\s|$)`, 'gi'), '$1.$2')
+    .replace(new RegExp(`(\\.(?:${TLDS}))\\s*\\/\\s*([a-z0-9_@~.-]+)`, 'gi'), '$1/$2')
+    .replace(/((?:https?:\/\/|www\.)[^\s]+?)\s*\/\s*([a-z0-9_@~.-]+)/gi, '$1/$2');
 
   const cues = [];
   const seenPrompts = new Set();
@@ -2786,59 +2910,82 @@ function getMagicCueSuggestionsForOcrText(rawText) {
   };
 
   // 1. Email detection (strings.xml:33: "Open <Email>")
-  const emailMatch = normalizedUrlText.match(/\b([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\b/);
-  if (emailMatch) {
-    const email = emailMatch[1];
-    const shortEmail = email.length > 26 ? email.slice(0, 24) + '…' : email;
-    addCue(`Open ${shortEmail}`, 'email', `mailto:${email}`);
+  const emailRegex = /\b([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,12})\b/g;
+  let emailMatch;
+  while ((emailMatch = emailRegex.exec(normalizedUrlText)) !== null) {
+    const email = emailMatch[1].replace(/[.,;:!?)'"\]]+$/, '');
+    if (email.length >= 5 && !/\.(png|jpg|jpeg|webp|svg|gif|css|js|ts|json)$/i.test(email)) {
+      const shortEmail = email.length > 28 ? email.slice(0, 26) + '…' : email;
+      addCue(`Open ${shortEmail}`, 'email', `mailto:${email}`);
+      break;
+    }
   }
 
-  // 2. URL / Website detection (supports https://, www., and bare domains/paths like github.com/user/repo or youtube.com)
-  const urlRegex = /\b((?:https?:\/\/|www\.)[^\s<>()"']+|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|org|net|edu|gov|io|dev|ai|co|app|me|gg|tv|xyz|info|uk|in|ca|de|fr|jp)(?:\/[^\s<>()"']*)?)\b/gi;
+  // 2. URL / Website detection (supports https://, www., and bare domains/paths like github.com/user/repo, x.com/home, etc.)
+  const urlRegex = new RegExp(
+    `\\b((?:https?:\\/\\/|www\\.)[^\\s<>()"']+|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+(?:${TLDS})(?:\\/[^\\s<>()"']*)?)`,
+    'gi'
+  );
   let urlMatch;
   while ((urlMatch = urlRegex.exec(normalizedUrlText)) !== null) {
-    const candidate = urlMatch[1].replace(/[.,;:!?)'"\]]+$/, '');
+    const candidate = urlMatch[1].replace(/[.,;:!?)'"\]>]+$/, '');
     const beforeChar = urlMatch.index > 0 ? normalizedUrlText[urlMatch.index - 1] : '';
     if (beforeChar === '@' || candidate.includes('@')) continue;
-    if (/^(console|window|document|math|object|array|string|number|json|system|process)\./i.test(candidate)) continue;
+    // Skip code property accesses or filenames like console.log, main.js, package.json
+    if (/^(console|window|document|math|object|array|string|number|json|system|process|state|this|self|nav|app|fs|os|path)\./i.test(candidate)) continue;
+    if (/\.(js|ts|jsx|tsx|py|cs|java|kt|cpp|c|h|css|scss|html|json|xml|yaml|yml|md|txt|sh|bat|exe|dll|png|jpg|jpeg|gif|svg|webp|ico|pdf|zip|tar|gz)$/i.test(candidate) && !/^https?:\/\//i.test(candidate) && !candidate.includes('/')) continue;
+
     const fullUrl = /^https?:\/\//i.test(candidate) ? candidate : `https://${candidate}`;
-    let host = candidate.replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0];
-    if (host.length > 24) host = host.slice(0, 22) + '…';
-    addCue(`Open ${host}`, 'link', fullUrl);
+    let displayTarget = candidate.replace(/^https?:\/\//i, '').replace(/^www\./i, '').replace(/\/$/, '');
+    if (displayTarget.length > 26) {
+      const hostOnly = displayTarget.split('/')[0];
+      displayTarget = hostOnly.length <= 26 ? hostOnly : hostOnly.slice(0, 24) + '…';
+    }
+    addCue(`Open ${displayTarget}`, 'link', fullUrl);
     break;
   }
 
   // 3. Street Address / Location detection (strings.xml:33: "Open in Maps")
-  const addressMatch = text.match(/\b(\d{1,5}\s+[A-Z][A-Za-z0-9.]{1,20}(?:\s+[A-Z][A-Za-z0-9.]{1,20}){0,3}\s+(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln|Court|Ct|Parkway|Pkwy|Plaza|Square)\b(?:,\s*[A-Z][A-Za-z\s]{2,20})?)/);
+  const addressMatch = text.match(/\b(\d{1,6}\s+[A-Z0-9][A-Za-z0-9.#-]{1,22}(?:\s+[A-Za-z0-9.#-]{1,22}){0,4}\s+(?:Street|St\.?|Avenue|Ave\.?|Road|Rd\.?|Boulevard|Blvd\.?|Drive|Dr\.?|Lane|Ln\.?|Court|Ct\.?|Parkway|Pkwy\.?|Way|Place|Pl\.?|Plaza|Square|Sq\.?|Highway|Hwy\.?|Terrace|Ter\.?|Trail|Trl\.?|Circle|Cir\.?)\b(?:,?\s*[A-Z][A-Za-z\s]{2,20})?(?:,?\s*[A-Z]{2}\s+\d{5})?)/i);
   if (addressMatch) {
     const addr = addressMatch[1].trim();
     addCue('Open in Maps', 'maps', `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}`);
   }
 
   // 4. Date / Time / Calendar Event detection (strings.xml:33: "Add to Calendar")
-  // STRICT: Never match lowercase "may" or standalone clock times or git/log timestamps!
-  const hasExplicitMonthDay = /\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?|(?:May))\s+\d{1,2}(?:st|nd|rd|th)?(?:,\s*\d{4}|\s+at\s+\d{1,2}(?::\d{2})?\s*(?:AM|PM|am|pm))\b/.test(text);
-  const hasDayWithTime = /\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Tomorrow)\s+(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:AM|PM|am|pm)\b/i.test(text);
-  const hasEventKeywordWithTime = /\b(?:meeting|appointment|call|webinar|conference|dinner|lunch|party|flight|event|session|interview|deadline|reminder)\b[^.!?\n]{0,40}\b(?:\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)|\d{1,2}\s*(?:AM|PM|am|pm)|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2})\b/i.test(text);
+  // STRICT: Require an actual event/schedule date or time (never bare social-media "Nov 3" post timestamps or lowercase "may")!
+  const hasDateWithYearOrTime = /\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?(?:,\s*\d{4}|\s+(?:at\s+|@\s*)?\d{1,2}(?::\d{2})?\s*(?:AM|PM|am|pm))\b/.test(text);
+  const hasNumericDate = /\b(?:0?[1-9]|1[0-2])\/(?:0?[1-9]|[12]\d|3[01])\/(?:20\d{2}|\d{2})\b/.test(text);
+  const hasDayWithTime = /\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mon|Tue|Wed|Thu|Fri|Sat|Sun|Tomorrow|Tonight)\b[^.!?\n]{0,25}?\b\d{1,2}(?::\d{2})?\s*(?:AM|PM|am|pm)\b/i.test(text);
+  const hasEventKeywordWithDateOrTime = /\b(?:meeting|appointment|call|webinar|conference|dinner|lunch|party|flight|event|session|interview|deadline|reminder|concert|show|workshop| reservation|rsvp|schedule)\b[^.!?\n]{0,50}?\b(?:\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)?|\d{1,2}\s*(?:AM|PM|am|pm)|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2}|\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Tomorrow)\b)/i.test(text);
   const isLogOrCodeTimestamp = /\b\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}|\b(?:commit|author:|date:|pid:|exit_code|elapsed_ms)\b/i.test(text);
 
-  if ((hasExplicitMonthDay || hasDayWithTime || hasEventKeywordWithTime) && !isLogOrCodeTimestamp) {
-    const eventTitle = text.split(/\r?\n/)[0].slice(0, 60).trim();
+  if ((hasDateWithYearOrTime || hasNumericDate || hasDayWithTime || hasEventKeywordWithDateOrTime) && !isLogOrCodeTimestamp) {
+    const firstNonEmptyLine = text.split(/\r?\n/).map((l) => l.trim()).find((l) => l.length > 2) || 'Event';
+    const eventTitle = firstNonEmptyLine.slice(0, 60);
     addCue('Add to Calendar', 'calendar', `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(eventTitle)}`);
   }
 
-  // 5. Flight Number detection (strings.xml:33 Example 5: "UA 456")
-  const flightMatch = text.match(/\b(UA|AA|DL|BA|LH|AF|EK|QF|SQ|WN|AS|B6|AC|NH|JL|CX|TK|QR)\s?(\d{2,4})\b/);
-  if (flightMatch && /\b(flight|airline|airport|terminal|gate|depart|arriv|boarding)\b/i.test(text)) {
-    const flightCode = `${flightMatch[1]} ${flightMatch[2]}`;
-    addCue(`Check flight ${flightCode}`, 'flight', `https://www.google.com/search?q=${encodeURIComponent(flightCode + ' flight status')}`);
+  // 5. Flight Number detection (strings.xml:33 Example 5: "UA 456", "DL 1204", "BA 283")
+  const flightMatch = text.match(/\b(UA|AA|DL|BA|LH|AF|EK|QF|SQ|WN|AS|B6|AC|NH|JL|CX|TK|QR|VS|KL|IB|AZ|AI|EY|BR|CI|OZ|KE)\s?(\d{2,4})\b/);
+  if (flightMatch) {
+    const airlineCode = flightMatch[1].toUpperCase();
+    const flightNum = flightMatch[2];
+    const hasFlightContext = /\b(flight|airline|airport|terminal|gate|depart|arriv|boarding|nonstop|layover|seat|pnr|booking)\b/i.test(text) || /^[A-Z]{2}\s?\d{2,4}$/i.test(text.trim());
+    if (hasFlightContext) {
+      const flightCode = `${airlineCode} ${flightNum}`;
+      addCue(`Check flight ${flightCode}`, 'flight', `https://www.google.com/search?q=${encodeURIComponent(flightCode + ' flight status')}`);
+    }
   }
 
-  // 6. Phone Number detection (strictly formatted phone numbers)
-  const phoneMatch = text.match(/(?:\+\d{1,3}[\s.-])?\(\d{3}\)[\s.-]?\d{3}[\s.-]\d{4}\b|(?:\+\d{1,3}[\s.-])?\b\d{3}-\d{3}-\d{4}\b/);
+  // 6. Phone Number detection (supports (555) 123-4567, 555-123-4567, 555.123.4567, +1 555 123 4567, 1-800-555-1234)
+  const phoneMatch = text.match(/(?:\+\d{1,3}[\s.-]?)?\(\d{3}\)[\s.-]?\d{3}[\s.-]?\d{4}\b|(?:\+\d{1,3}[\s.-]?)?\b\d{3}[\s.-]\d{3}[\s.-]\d{4}\b/);
   if (phoneMatch) {
     const phone = phoneMatch[0].trim();
-    addCue(`Call ${phone}`, 'phone', `tel:${phone.replace(/[^\d+]/g, '')}`);
+    // Ensure it's not a date or IP-like number
+    if (!/^\d{4}-\d{2}-\d{2}/.test(phone)) {
+      addCue(`Call ${phone}`, 'phone', `tel:${phone.replace(/[^\d+]/g, '')}`);
+    }
   }
 
   return cues.slice(0, 2); // MAX_MAGIC_CUE_SUGGESTIONS = 2
@@ -4170,6 +4317,24 @@ function activateOverlay(data) {
   syncLlmSettingsUI();
 
   if (!wasActive) {
+    // Exact port of AOIDetectorImpl.resetMonitoringState() (AOIDetectorImpl.java:552-600):
+    // Clear all previous session's OCR blocks, MobileRaid AOIs, sub-elements, and hover state
+    // so stale rectangles from an older screen or scroll position NEVER appear!
+    visionWorkerSeq++;
+    state.ocrTextAOIs = [];
+    state.raidScreenElementAOIs = [];
+    state.segmentedScreenElements.clear();
+    for (const timerId of state.segmentingScreenElementTimers.values()) {
+      clearTimeout(timerId);
+    }
+    state.segmentingScreenElementTimers.clear();
+    clearTimeout(state.hoverDelayTimer);
+    state.hoveredAoi = null;
+    state.renderedHoverAoi = null;
+    state.hoverCardAlpha = 0;
+    state.scrimCutOutAlpha = 0;
+    state.hasFirstAoiAmbientTransitionPlayed = false;
+
     // New session: reset per-session launch timestamp, idle-hint & interaction flags (MainScreenStateFragmentPeer.java)
     state.launchTimestampMs = performance.now();
     state.shouldShowCharLimitSnackbar = true;
@@ -4323,6 +4488,19 @@ api.onCursorMove((data) => {
 
 api.onDeactivate(() => {
   state.active = false;
+  visionWorkerSeq++;
+  state.ocrTextAOIs = [];
+  state.raidScreenElementAOIs = [];
+  state.segmentedScreenElements.clear();
+  for (const timerId of state.segmentingScreenElementTimers.values()) {
+    clearTimeout(timerId);
+  }
+  state.segmentingScreenElementTimers.clear();
+  clearTimeout(state.hoverDelayTimer);
+  state.hoveredAoi = null;
+  state.renderedHoverAoi = null;
+  state.hoverCardAlpha = 0;
+  state.scrimCutOutAlpha = 0;
   clearTimeout(state.idleHintTimer);
   state.idleHintTimer = null;
   clearTimeout(state.offlineTimer);

@@ -324,11 +324,17 @@ function runSegmenterOnBitmap(bitmap, modelType) {
       let aoiCategory = null;
       let isCommonObject = false;
       if (modelType === 'SCREEN_ELEMENT') {
-        if (classId === 704) {
+        // Exact bytecode from MobileRaidSegmenterImpl.smali:1048-1102:
+        // SCREEN_ELEMENT_CLASS_ID = 704 (0x2c0), INTERACTABLE_CLASS_ID = 706 (0x2c2)
+        // activeScreenElementThreshold = 0.8f (for classId 704), activeThreshold = 0.4f (for classId 706)
+        // Any classId != 704 && classId != 706 is rejected!
+        if (classId !== 706 && classId !== 704) {
+          aoiCategory = null;
+        } else if (classId === 704 && score < 0.8) {
+          aoiCategory = null;
+        } else if (classId === 704) {
           aoiCategory = 'WINDOW';
-        } else if (classId === 706 && score >= 0.8) {
-          aoiCategory = 'INTERACTABLE';
-        } else if (score >= 0.8) {
+        } else {
           aoiCategory = 'INTERACTABLE';
         }
       } else {
