@@ -1338,10 +1338,11 @@ function processOcrResultIntoTextAOIs(ocrData) {
       const hitEl = document.elementFromPoint(state.cursorX, state.cursorY);
       updateCursorTypeForTarget(hitEl);
     }
-    // Backfill ocrText on any already-selected screen AOIs whose OCR hadn't arrived yet when clicked/dragged!
+    // Backfill ocrText on any already-selected screen AOIs from the CURRENT session whose OCR hadn't arrived yet!
+    // (Skip saved-draft AOIs from a previous session so new-screen OCR never wipes out cached suggestions!)
     let backfilled = false;
     for (const aoi of state.selectedAOIs) {
-      if (aoi.type === 'screen' && aoi.rect && !aoi.ocrText) {
+      if (aoi.type === 'screen' && aoi.rect && !aoi.ocrText && !aoi.fromSavedDraft) {
         const contained = fetchContainedOcrTextForRect(aoi.rect);
         if (contained) {
           aoi.ocrText = contained;
@@ -3387,8 +3388,11 @@ function getOrCreateLlmWorker() {
       const msg = e.data;
       if (!msg) return;
       if (msg.type === 'suggestions_ready' && Array.isArray(msg.chips) && msg.chips.length > 0) {
+        if (state.inflightLlmKey === msg.reqId) {
+          state.inflightLlmKey = null;
+        }
         state.llmChipsCache.set(msg.reqId, msg.chips);
-        if (state.expanded && !state.isCollapsed && state.currentLlmCacheKey === msg.reqId) {
+        if (state.active && state.expanded && !state.isCollapsed && state.currentLlmCacheKey === msg.reqId) {
           renderSuggestionChips();
         }
       }
@@ -4520,6 +4524,9 @@ function playSaveDraftAndExitAnimation() {
       state.exitFlightScale = 1.0;
       state.exitFlightAlpha = 1.0;
       state.isExiting = false;
+      for (const aoi of state.selectedAOIs) {
+        aoi.fromSavedDraft = true;
+      }
       state.draftSavedAtMs = (state.selectedAOIs.length > 0 || state.promptText.trim().length > 0) ? Date.now() : 0;
       recordShakeDismissOnFinish();
       api.dismiss();
@@ -5158,6 +5165,12 @@ function activateOverlay(data) {
     }
 
     if (state.selectedAOIs.length > 0 || state.promptText.trim().length > 0) {
+      if (!wasActive) {
+        // Reset lastRenderedSuggestionsSig on fresh activation so saved-draft suggestion chips
+        // (including chips generated in the background while collapsed/dismissed) animate in cleanly!
+        state.lastRenderedSuggestionsSig = '';
+        state.expanded = false;
+      }
       setExpandedState(true);
     } else {
       state.aoiSelectionMode = true;
