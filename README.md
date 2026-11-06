@@ -1,49 +1,89 @@
 <div align="center">
 
-<img src="extracted_assets/icon.png" alt="Magic Pointer" width="88" />
+<img src="extracted_assets/icon.png" alt="Magic Pointer" width="96" />
 
-# Magic Pointer
+# Magic Pointer for Windows
 
-**Googlebook's `com.google.android.desktop.gpointer.app`, ported to Windows.**
+### **Shake your mouse. Point at anything on your screen. Ask AI in one click.**
 
-Wiggle your cursor or press <kbd>Win</kbd> + <kbd>G</kbd> to point at anything on your screen and send it to Gemini in Chrome.
+Google’s new flagship laptops come with a built-in superpower called **Magic Pointer**—now brought to **Windows 10 & 11** and supercharged to work with **Gemini**, **ChatGPT**, and **Claude**.
+
+<p align="center">
+  <a href="#-get-started-in-30-seconds"><img src="https://img.shields.io/badge/Platform-Windows_10_%26_11-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Windows 10 & 11" /></a>
+  <a href="#-works-with-your-favorite-ai"><img src="https://img.shields.io/badge/AI_Companion-Gemini_%7C_ChatGPT_%7C_Claude-8AB4F8?style=for-the-badge" alt="Gemini | ChatGPT | Claude" /></a>
+  <a href="#-why-people-love-it"><img src="https://img.shields.io/badge/100%25_Local-Screen_Detection_%26_OCR-34A853?style=for-the-badge" alt="100% Local Screen Detection & OCR" /></a>
+</p>
 
 <br />
 
-<img src="extracted_assets/verified_promptbox_closeup.png" alt="Magic Pointer" width="720" />
+<img src="extracted_assets/showcase/hero_banner.png" alt="Magic Pointer Hero Showcase" width="100%" />
 
 </div>
 
 ---
 
-## Overview
+## Why Take Screenshots When You Can Just Point?
 
-Google's new desktop laptops ship with a built-in system app called **Magic Pointer** (`com.google.android.desktop.gpointer.app`). When you shake your mouse cursor, it freezes a snapshot of the screen in RAM, runs local MediaPipe TFLite models to detect UI elements, objects, and text under your cursor, and opens a floating prompt box attached to your pointer.
+Every time you want to ask AI about something on your screen, you normally have to:
+1. Take a screenshot and manually crop it
+2. Save or copy the image
+3. Alt-Tab to your browser or AI app
+4. Paste it in and type your question
 
-This repo is a reverse-engineered Windows port built directly from the unpacked APK (`1.0.260916`). It runs the original shaders, TFLite models, Lottie assets, and spring constants from the decompiled source.
+**Magic Pointer replaces all of that with one natural motion.**  
+Just wiggle your mouse cursor (or press <kbd>Win</kbd> + <kbd>G</kbd>), click whatever you're looking at, and your AI companion slides onto the right side of your screen with the answer.
 
-## What's Inside
+<br />
 
-- **Original AGSL Energy Shader (`extracted_assets/shaders/energy_shader.glsl`)** — Ported to WebGL2 (`renderer.js`). Renders the simplex-noise glow and halftone dot pattern around the selection box, prompt box, suggestion chips, and loading skeletons using the exact uniform presets (`DefaultCardConfig`, `DefaultChipConfig`, `DefaultLoaderConfig`).
-- **Original On-Device Vision Models (`extracted_assets/models/`)** — Runs `mobile_raid_v2_2_float32_finetuned_0804.tflite` (windows & UI controls) and `mobile_raid_common_object_33_int8_0730_w_metadata.tflite` (objects) locally in a Web Worker via MediaPipe WASM, alongside an 8x8 grayscale histogram cache (`CommonObjectCache`).
-- **Low-Latency Win32 Hook & OCR (`native/MagicCursorNative.cs`)** — A lightweight C# background process that watches `WH_MOUSE_LL` for cursor wiggles, grabs a `BitBlt` screen capture before the overlay shows, enumerates DWM window rects, and runs `Windows.Media.Ocr` for text selection.
-- **Compose Spring Physics** — Uses the same spring parameters as `MainScreenKt.java` and `PromptBoxKt.java`:
-  - Prompt box cursor follow & screen-edge clamping: `stiffness = 1500`, `damping = 1.0`
-  - AOI bounding box morphing: `stiffness = 700` (position) / `1400` (size)
-  - Suggestion chip stagger: `250ms` cubic-bezier with `50ms` per-chip delay
-  - Multi-select thumbnail grid (`SelectedAOIsDisplay`): 2-column reflow (`stiffness = 400`) up to 5 items
-- **First-Time Experience (FTE) & Wiggle Tuner** — The 3-step onboarding dialog and 4-speed wiggle sensitivity tester (`Speed 0–3`) using the original Lottie animations (`swatchie__fte_wiggle_banner_*`).
+<div align="center">
+  <img src="extracted_assets/showcase/how_it_works.png" alt="How Magic Pointer Works in 3 Seconds" width="100%" />
+</div>
 
 ---
 
-## Usage
+## ✨ What You Can Do With It
 
-### Requirements
-- Windows 10 or 11 (x64)
-- [Node.js](https://nodejs.org/) 18+
-- Google Chrome
+<div align="center">
+  <img src="extracted_assets/showcase/features_bento.png" alt="Magic Pointer Features" width="100%" />
+</div>
 
-### Run
+<br />
+
+| Everyday Superpower | How It Feels |
+| :--- | :--- |
+| **Point & Click Anything** | Hover over any photo, chart, button, or window—a glowing aura automatically snaps around it. No manual cropping needed. |
+| **Grab Uncopyable Text** | Paused a YouTube video, looking at a scanned PDF, or reading an image? Just drag across the words to copy them or send them straight to AI. |
+| **Stack Up to 5 Selections** | Hold <kbd>Ctrl</kbd> and click up to 5 different things on your screen (or click `+` to attach local files) to compare them in a single prompt. |
+| **One-Click Smart Suggestions** | Don't feel like typing? Magic Pointer reads what you selected and gives you 3 instant action chips right under your cursor. |
+| **Side-by-Side Companion Dock** | Your AI app automatically resizes into a clean floating companion window on the right side of your screen so it never covers your work. |
+
+---
+
+## 🤖 Works With Your Favorite AI
+
+You aren't locked into a single AI ecosystem. Switch your target companion app anytime from the **Settings** card or your **System Tray**:
+
+- **Google Gemini** — Opens and docks your Gemini Desktop app
+- **OpenAI ChatGPT** — Opens and docks your ChatGPT Desktop app
+- **Anthropic Claude** — Opens and docks your Claude Desktop app
+
+<div align="center">
+  <br />
+  <img src="extracted_assets/verified_promptbox_closeup.png" alt="Magic Pointer Floating Prompt & Smart Suggestions" width="460" />
+  <p><em>The floating prompt box and smart action chips right next to your cursor.</em></p>
+</div>
+
+---
+
+## 🚀 Get Started in 30 Seconds
+
+### Option 1: Double-Click Launchers (Easiest)
+Once downloaded, you don't need to touch a terminal every day:
+- Double-click **`Start Magic Cursor.bat`** to launch immediately.
+- Double-click **`Start Magic Cursor (Silent Tray).vbs`** to run it quietly in your Windows system tray in the background.
+
+### Option 2: First-Time Setup from GitHub
+Make sure you have [Node.js](https://nodejs.org/) installed on Windows 10 or 11, then run:
 
 ```bash
 git clone https://github.com/YashjitPal/Magic-Pointer.git
@@ -52,42 +92,24 @@ npm install
 npm start
 ```
 
-Or double-click:
-- `Start Magic Cursor.bat` — starts immediately
-- `Start Magic Cursor (Silent Tray).vbs` — runs headless in the system tray
-
 ---
 
-## Controls
+## 🎮 Quick Controls Cheat Sheet
 
-| Input | Action |
+| Do This | What Happens |
 | :--- | :--- |
-| **Wiggle cursor** / <kbd>Win</kbd> + <kbd>G</kbd> / <kbd>Alt</kbd> + <kbd>M</kbd> | Open Magic Pointer at cursor |
-| **Click** | Select hovered object or UI element |
-| **Click & drag** | Draw custom region or highlight screen text (I-Beam) |
-| **Hold <kbd>Ctrl</kbd> + Click / Drag** | Multi-select up to 5 regions |
-| **`+` button** | Attach local files or images |
-| <kbd>Esc</kbd> | Close overlay |
-| **System Tray icon** (right-click) | Change wiggle sensitivity (`Speed 0–3`), toggle dark/light theme, or open FTE tutorial |
+| **Wiggle your mouse** *(or press <kbd>Win</kbd> + <kbd>G</kbd>)* | Summons Magic Pointer right where your cursor is |
+| **Click** | Selects the highlighted image, card, or window under your cursor |
+| **Click & Drag** | Draws a custom box—or highlights text directly off your screen |
+| **Hold <kbd>Ctrl</kbd> + Click / Drag** | Stacks up to **5 selections** into one prompt |
+| **Click the `+` Button** | Attaches any file or photo from your computer |
+| **Press <kbd>Esc</kbd>** | Dismisses the overlay and returns to your desktop |
+| **Right-Click the Tray Icon** | Adjust wiggle sensitivity (`4 speed levels`), switch between **Gemini / ChatGPT / Claude**, or toggle Dark & Light themes |
 
 ---
 
-## Project Layout
+<div align="center">
 
-```text
-├── main.js                        # Electron main process, overlay window, tray & IPC
-├── preload.js                     # IPC bridge
-├── renderer.js                    # WebGL2 shader pipeline, spring physics, UI & AOI logic
-├── vision_worker.js               # MediaPipe TFLite worker (MobileRaid v2.2 + Common Object)
-├── index.html                     # Overlay markup
-├── styles.css                     # Material 3 styles & tokens
-├── native/
-│   ├── MagicCursorNative.cs       # Win32 mouse hook, BitBlt capture, DWM windows & WinRT OCR
-│   └── MagicCursorNative_v3.exe   # Compiled native helper
-└── extracted_assets/
-    ├── shaders/energy_shader.glsl # Decompiled AGSL/GLSL shader
-    ├── models/                    # Extracted .tflite segmentation & OCR models
-    ├── mediapipe/                 # MediaPipe Tasks Vision WASM runtime
-    ├── lottie/                    # Extracted FTE & wiggle banner animations
-    └── svg/                       # Extracted cursors & icons
-```
+**Built for Windows 10 & 11** · Give the repo a ⭐ if Magic Pointer saves you from taking another screenshot!
+
+</div>
